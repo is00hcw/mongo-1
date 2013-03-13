@@ -1987,7 +1987,9 @@ namespace mongo {
 
         std::string dbname = nsToDatabase( cmdns );
 
-        if (c->adminOnly() && c->localHostOnlyIfNoAuth(cmdObj) && noauth &&
+        if (c->adminOnly() &&
+                c->localHostOnlyIfNoAuth(cmdObj) &&
+                !AuthorizationManager::isAuthEnabled() &&
                 !client.getIsLocalHostConnection()) {
             log() << "command denied: " << cmdObj.toString() << endl;
             appendCommandStatus(result,
@@ -2003,7 +2005,7 @@ namespace mongo {
             return;
         }
 
-        if (!noauth && c->requiresAuth()) {
+        if (AuthorizationManager::isAuthEnabled()) {
             std::vector<Privilege> privileges;
             c->addRequiredPrivileges(dbname, cmdObj, &privileges);
             Status status = client.getAuthorizationManager()->checkAuthForPrivileges(privileges);

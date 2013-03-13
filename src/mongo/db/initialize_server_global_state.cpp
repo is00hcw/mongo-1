@@ -166,7 +166,7 @@ namespace mongo {
                 return false;
             }
 
-            noauth = false;
+            AuthorizationManager::setAuthEnabled(true);
         }
 
         return true;

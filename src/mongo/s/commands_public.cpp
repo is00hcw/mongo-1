@@ -535,9 +535,12 @@ namespace mongo {
             }
         };
         MONGO_INITIALIZER(RegisterCopyDBCommand)(InitializerContext* context) {
-            // Leaked intentionally: a Command registers itself when constructed.
-            // NOTE: this initializer block cannot be removed due to SERVER-9167
-            new CopyDBCmd();
+            if (!AuthorizationManager::isAuthEnabled()) {
+                // Leaked intentionally: a Command registers itself when constructed.
+                new CopyDBCmd();
+            } else {
+                new NotWithAuthCmd("copydb");
+            }
             return Status::OK();
         }
 
