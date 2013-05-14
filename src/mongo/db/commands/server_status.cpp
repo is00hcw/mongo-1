@@ -20,6 +20,7 @@
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/db/cmdline.h"
@@ -79,7 +80,7 @@ namespace mongo {
             BSONObjBuilder timeBuilder(256);
 
             const ClientBasic* myClientBasic = ClientBasic::getCurrent();
-            AuthorizationManager* authManager = myClientBasic->getAuthorizationManager();
+            AuthorizationSession* authSession = myClientBasic->getAuthorizationSession();
             
             // --- basic fields that are global
 
@@ -102,7 +103,7 @@ namespace mongo {
                 
                 std::vector<Privilege> requiredPrivileges;
                 section->addRequiredPrivileges(&requiredPrivileges);
-                if (!authManager->checkAuthForPrivileges(requiredPrivileges).isOK())
+                if (!authSession->checkAuthForPrivileges(requiredPrivileges).isOK())
                     continue;
 
                 bool include = section->includeByDefault();

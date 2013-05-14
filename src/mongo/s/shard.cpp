@@ -413,7 +413,8 @@ namespace mongo {
     }
 
     void ShardingConnectionHook::onCreate( DBClientBase * conn ) {
-        if(AuthorizationManager::isAuthEnabled()) {
+        if (AuthorizationManager::isAuthEnabled()) {
+            bool result;
             string err;
             LOG(2) << "calling onCreate auth for " << conn->toString() << endl;
 

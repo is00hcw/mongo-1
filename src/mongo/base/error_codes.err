@@ -35,4 +35,7 @@ error_code("RoleNotFound", 31)
 error_code("RolesNotRelated", 32)
 error_code("PrivilegeNotFound", 33)
 
+# Non-sequential error codes (for compatibility only)
+error_code("NodeNotFound", 74)
+
 error_class("NetworkError", ["HostUnreachable", "HostNotFound"])

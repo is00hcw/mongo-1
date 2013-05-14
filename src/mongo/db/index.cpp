@@ -21,6 +21,8 @@
 
 #include <boost/checked_delete.hpp>
 
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/collection.h"
 #include "mongo/db/index.h"
 #include "mongo/db/curop.h"

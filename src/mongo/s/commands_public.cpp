@@ -25,6 +25,7 @@
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands/find_and_modify.h"
 #include "mongo/db/commands/mr.h"
@@ -1783,7 +1784,7 @@ namespace mongo {
                                                std::vector<Privilege>* out) {
                 // $eval can do pretty much anything, so require all privileges.
                 out->push_back(Privilege(PrivilegeSet::WILDCARD_RESOURCE,
-                                         AuthorizationManager::getAllUserActions()));
+                                         AuthorizationSession::getAllUserActions()));
             }
             virtual bool run(const string& dbName,
                              BSONObj& cmdObj,

@@ -57,8 +57,10 @@ namespace mongo {
             return false;
         }
 
-        const string userToken = ClientBasic::getCurrent()->getAuthorizationManager()
-                                                          ->getAuthenticatedPrincipalNamesToken();
+        //const string userToken = ClientBasic::getCurrent()->getAuthorizationManager()
+        //                                                  ->getAuthenticatedPrincipalNamesToken();
+        verify(false);
+        const string userToken = ""; // TODO: Fix up when auth is fixed
         auto_ptr<Scope> s = globalScriptEngine->getPooledScope( dbName, "dbeval" + userToken );
         ScriptingFunction f = s->createFunction(code);
         if ( f == 0 ) {
