@@ -14,7 +14,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "mongo/db/auth/auth_external_state_s.h"
+#include "mongo/db/auth/auth_session_external_state_s.h"
 
 #include <string>
 
@@ -25,10 +25,14 @@
 
 namespace mongo {
 
-    AuthExternalStateMongos::AuthExternalStateMongos() {}
-    AuthExternalStateMongos::~AuthExternalStateMongos() {}
+    AuthSessionExternalStateMongos::AuthSessionExternalStateMongos() {}
+    AuthSessionExternalStateMongos::~AuthSessionExternalStateMongos() {}
 
-    void AuthExternalStateMongos::startRequest() {
+    void AuthSessionExternalStateMongos::onAddAuthorizedPrincipal(Principal*) { }
+
+    void AuthSessionExternalStateMongos::onLogoutDatabase(const std::string&) { }
+
+    void AuthSessionExternalStateMongos::startRequest() {
         _checkShouldAllowLocalhost();
     }
 
@@ -47,7 +51,7 @@ namespace mongo {
         }
     }
 
-    bool AuthExternalStateMongos::_findUser(const string& usersNamespace,
+    bool AuthSessionExternalStateMongos::_findUser(const string& usersNamespace,
                                             const BSONObj& queryDoc,
                                             BSONObj* result) const {
         scoped_ptr<ScopedDbConnection> conn(getConnectionForUsersCollection(usersNamespace));
