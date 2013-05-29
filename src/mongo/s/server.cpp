@@ -21,7 +21,13 @@
 
 #include <boost/thread/thread.hpp>
 
+#include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
+#include "mongo/base/status.h"
+#include "mongo/client/connpool.h"
+#include "mongo/db/auth/auth_global_external_state_s.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/initialize_server_global_state.h"
 #include "../util/net/message.h"
 #include "../util/startup_test.h"
@@ -549,7 +555,16 @@ namespace mongo {
 }  // namespace mongo
 #endif
 
+<<<<<<< HEAD
 int main(int argc, char* argv[], char** envp) {
+=======
+MONGO_INITIALIZER(CreateAuthorizationManager)(InitializerContext* context) {
+    setGlobalAuthorizationManager(new AuthorizationManager(new AuthGlobalExternalStateMongos()));
+    return Status::OK();
+}
+
+int mongoSMain(int argc, char* argv[], char** envp) {
+>>>>>>> 0723117... Set up a single global AuthorizationManager in mongos and mongod
     static StaticObserver staticObserver;
     if (argc < 1)
         ::_exit(EXIT_FAILURE);
