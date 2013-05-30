@@ -14,18 +14,27 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "mongo/db/auth/auth_global_external_state_s.h"
+#include "mongo/db/auth/authz_session_external_state_s.h"
 
 #include <string>
 
+#include "mongo/base/status.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/s/grid.h"
 
 namespace mongo {
 
-    AuthGlobalExternalStateMongos::AuthGlobalExternalStateMongos() {}
-    AuthGlobalExternalStateMongos::~AuthGlobalExternalStateMongos() {}
+    AuthzSessionExternalStateMongos::AuthzSessionExternalStateMongos() {}
+    AuthzSessionExternalStateMongos::~AuthzSessionExternalStateMongos() {}
+
+    void AuthzSessionExternalStateMongos::onAddAuthorizedPrincipal(Principal*) { }
+
+    void AuthzSessionExternalStateMongos::onLogoutDatabase(const std::string&) { }
+
+    void AuthzSessionExternalStateMongos::startRequest() {
+        _checkShouldAllowLocalhost();
+    }
 
     namespace {
         ScopedDbConnection* getConnectionForUsersCollection(const std::string& ns) {
@@ -38,14 +47,16 @@ namespace mongo {
             DBConfigPtr config = grid.getDBConfig(ns);
             Shard s = config->getShard(ns);
 
-            return new ScopedDbConnection(s.getConnString(), 30.0);
+            return ScopedDbConnection::getInternalScopedDbConnection(s.getConnString(), 30.0);
         }
     }
 
-    bool AuthGlobalExternalStateMongos::_findUser(const string& usersNamespace,
-                                                  const BSONObj& query,
-                                                  BSONObj* result) const {
+    bool AuthzSessionExternalStateMongos::_findUser(const string& usersNamespace,
+                                                   const BSONObj& queryDoc,
+                                                   BSONObj* result) const {
         scoped_ptr<ScopedDbConnection> conn(getConnectionForUsersCollection(usersNamespace));
+        Query query(queryDoc);
+        query.readPref(ReadPreference_PrimaryPreferred, BSONArray());
         *result = conn->get()->findOne(usersNamespace, query).getOwned();
         conn->done();
         return !result->isEmpty();
