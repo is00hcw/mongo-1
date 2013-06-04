@@ -77,7 +77,7 @@ namespace {
 
     // This sets up the system role ActionSets.  This is what determines what actions each role
     // is authorized to perform
-    MONGO_INITIALIZER(AuthorizationSystemRoles)(InitializerContext* context) {
+    MONGO_INITIALIZER(AuthorizationSystemRolesOld)(InitializerContext* context) {
         // Read role
         readRoleActions.addAction(ActionType::cloneCollectionLocalSource);
         readRoleActions.addAction(ActionType::collectionsExist);
@@ -282,6 +282,10 @@ namespace {
         return Status::OK();
     }
 
+    const AuthorizationManager& AuthorizationSession::getAuthorizationManager() const {
+        return _externalState->getAuthorizationManager();
+    }
+
     Status AuthorizationSession::checkValidPrivilegeDocument(const StringData& dbname,
                                                              const BSONObj& doc) {
         BSONElement userElement = doc[AuthorizationManager::USER_NAME_FIELD_NAME];
@@ -378,16 +382,6 @@ namespace {
     }
 
     AuthorizationSession::~AuthorizationSession(){}
-
-    ActionSet AuthorizationSession::getAllUserActions() {
-        ActionSet allActions;
-        allActions.addAllActionsFromSet(readRoleActions);
-        allActions.addAllActionsFromSet(readWriteRoleActions);
-        allActions.addAllActionsFromSet(userAdminRoleActions);
-        allActions.addAllActionsFromSet(dbAdminRoleActions);
-        allActions.addAllActionsFromSet(clusterAdminRoleActions);
-        return allActions;
-    }
 
     void AuthorizationSession::startRequest() {
         _externalState->startRequest();
@@ -507,7 +501,10 @@ namespace {
             allActions.addAllActions();
             return acquirePrivilege(Privilege(PrivilegeSet::WILDCARD_RESOURCE, allActions), user);
         }
-        return buildPrivilegeSet(dbname, user, privilegeDocument, &_acquiredPrivileges);
+        return _externalState->getAuthorizationManager().buildPrivilegeSet(dbname,
+                                                                           user,
+                                                                           privilegeDocument,
+                                                                           &_acquiredPrivileges);
     }
 
     Status AuthorizationSession::buildPrivilegeSet(const std::string& dbname,
