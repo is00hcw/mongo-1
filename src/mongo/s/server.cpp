@@ -21,6 +21,7 @@
 
 #include <boost/thread/thread.hpp>
 
+#include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
 #include "mongo/client/connpool.h"
@@ -566,7 +567,6 @@ int mongoSMain(int argc, char* argv[], char** envp) {
 
     mongosCommand = argv[0];
 
-    setGlobalAuthorizationManager(new AuthorizationManager(new AuthzManagerExternalStateMongos()));
     processCommandLineOptions(std::vector<std::string>(argv, argv + argc));
     mongo::runGlobalInitializersOrDie(argc, argv, envp);
     CmdLine::censor(argc, argv);

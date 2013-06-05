@@ -7,7 +7,6 @@
 #include "mongo/base/counter.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/jsobj.h"
@@ -39,7 +38,7 @@ namespace mongo {
      * connection will be used for!
      */
     bool replAuthenticate(DBClientBase *conn, bool skipAuthCheck) {
-        if(!getGlobalAuthorizationManager()->isAuthEnabled()) {
+        if(!AuthorizationManager::isAuthEnabled()) {
             return true;
         }
         if (!skipAuthCheck && !cc().getAuthorizationSession()->hasInternalAuthorization()) {
@@ -160,8 +159,7 @@ namespace mongo {
                                                                           30 /* tcp timeout */));
             string errmsg;
             if ( !_conn->connect(hostName.c_str(), errmsg) ||
-                 (getGlobalAuthorizationManager()->isAuthEnabled() &&
-                         !replAuthenticate(_conn.get(), true)) ) {
+                 (AuthorizationManager::isAuthEnabled() && !replAuthenticate(_conn.get(), true)) ) {
                 resetConnection();
                 log() << "repl: " << errmsg << endl;
                 return false;
