@@ -28,6 +28,7 @@
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/jsobj.h"
@@ -413,7 +414,7 @@ namespace mongo {
     }
 
     void ShardingConnectionHook::onCreate( DBClientBase * conn ) {
-        if (AuthorizationManager::isAuthEnabled()) {
+        if(getGlobalAuthorizationManager()->isAuthEnabled()) {
             bool result;
             string err;
             LOG(2) << "calling onCreate auth for " << conn->toString() << endl;

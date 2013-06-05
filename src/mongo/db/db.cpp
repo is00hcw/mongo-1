@@ -25,7 +25,6 @@
 
 #include <db.h>
 
-#include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
 #include "mongo/db/collection.h"
@@ -728,7 +727,7 @@ namespace mongo {
         CmdLine::launchOk();
 #endif
 
-        if(AuthorizationManager::isAuthEnabled()) {
+        if(getGlobalAuthorizationManager()->isAuthEnabled()) {
             // open admin db in case we need to use it later. TODO this is not the right way to
             // resolve this.
             LOCK_REASON(lockReason, "startup: opening admin db");
@@ -983,10 +982,10 @@ static void processCommandLineOptions(const std::vector<std::string>& argv) {
             cmdLine.cpu = true;
         }
         if (params.count("noauth")) {
-            AuthorizationManager::setAuthEnabled(false);
+            getGlobalAuthorizationManager()->setAuthEnabled(false);
         }
         if (params.count("auth")) {
-            AuthorizationManager::setAuthEnabled(true);
+            getGlobalAuthorizationManager()->setAuthEnabled(true);
         }
         if (params.count("quota")) {
             cmdLine.quota = true;
@@ -1344,11 +1343,6 @@ static void processCommandLineOptions(const std::vector<std::string>& argv) {
     }
 }
 
-MONGO_INITIALIZER(CreateAuthorizationManager)(InitializerContext* context) {
-    setGlobalAuthorizationManager(new AuthorizationManager(new AuthzManagerExternalStateMongod()));
-    return Status::OK();
-}
-
 static int mongoDbMain(int argc, char* argv[], char **envp) {
     static StaticObserver staticObserver;
 
@@ -1370,6 +1364,7 @@ static int mongoDbMain(int argc, char* argv[], char **envp) {
     if( argc == 1 )
         cout << dbExecCommand << " --help for help and startup options" << endl;
 
+    setGlobalAuthorizationManager(new AuthorizationManager(new AuthzManagerExternalStateMongod()));
     processCommandLineOptions(std::vector<std::string>(argv, argv + argc));
     setupSignalHandlers();
 

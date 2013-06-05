@@ -21,7 +21,6 @@
 
 #include <boost/thread/thread.hpp>
 
-#include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
 #include "mongo/client/connpool.h"
@@ -555,22 +554,19 @@ namespace mongo {
 }  // namespace mongo
 #endif
 
-<<<<<<< HEAD
-int main(int argc, char* argv[], char** envp) {
-=======
 MONGO_INITIALIZER(CreateAuthorizationManager)(InitializerContext* context) {
     setGlobalAuthorizationManager(new AuthorizationManager(new AuthzManagerExternalStateMongos()));
     return Status::OK();
 }
 
 int mongoSMain(int argc, char* argv[], char** envp) {
->>>>>>> 0723117... Set up a single global AuthorizationManager in mongos and mongod
     static StaticObserver staticObserver;
     if (argc < 1)
         ::_exit(EXIT_FAILURE);
 
     mongosCommand = argv[0];
 
+    setGlobalAuthorizationManager(new AuthorizationManager(new AuthzManagerExternalStateMongos()));
     processCommandLineOptions(std::vector<std::string>(argv, argv + argc));
     mongo::runGlobalInitializersOrDie(argc, argv, envp);
     CmdLine::censor(argc, argv);
