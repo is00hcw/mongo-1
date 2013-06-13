@@ -1,5 +1,4 @@
-/*    Copyright 2009 10gen Inc.
- *
+ /*
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
  *    You may obtain a copy of the License at
@@ -25,31 +24,7 @@
 #include <openssl/ssl.h>
 
 namespace mongo {
-    class SSLParams {
-    public:
-        SSLParams(const std::string& pemfile, 
-                  const std::string& pempwd,
-                  const std::string& cafile = "",
-                  const std::string& crlfile = "",
-                  bool weakCertificateValidation = false,
-                  bool fipsMode = false) :
-            pemfile(pemfile),
-            pempwd(pempwd),
-            cafile(cafile),
-            crlfile(crlfile),
-            weakCertificateValidation(weakCertificateValidation),
-            fipsMode(fipsMode) {};
-
-        std::string pemfile;
-        std::string pempwd;
-        std::string cafile;
-        std::string crlfile;
-        bool weakCertificateValidation;
-        bool fipsMode;
-    };
-
-    class SSLManager {
-    MONGO_DISALLOW_COPYING(SSLManager);
+    class SSLManagerInterface {
     public:
         explicit SSLManager(const SSLParams& params);
 
@@ -70,8 +45,9 @@ namespace mongo {
         /**
          * Fetches a peer certificate and validates it if it exists
          * Throws SocketException on failure
+         * @return a std::string containing the certificate's subject name.
          */
-        void validatePeerCertificate(const SSL* ssl);
+        virtual std::string validatePeerCertificate(const SSL* ssl) = 0;
 
         /**
          * Cleans up SSL thread local memory; use at thread exit
@@ -80,19 +56,13 @@ namespace mongo {
         static void cleanupThreadLocals();
 
         /**
-         * Callbacks for SSL functions
+         * Get the subject name of our own server certificate
+         * @return the subject name.
          */
-        static int password_cb( char *buf,int num, int rwflag,void *userdata );
-        static int verify_cb(int ok, X509_STORE_CTX *ctx);
+        virtual std::string getSubjectName() = 0;
 
-    private:
-        SSL_CTX* _context;
-        std::string _password;
-        bool _validateCertificates;
-        bool _weakValidation;
         /**
-         * creates an SSL context to be used for this file descriptor.
-         * caller must SSL_free it.
+         * ssl.h shims
          */
         SSL* _secure(int fd);
 

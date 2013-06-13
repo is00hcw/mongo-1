@@ -86,18 +86,150 @@ namespace mongo {
         static boost::thread_specific_ptr<SSLThreadInfo> _thread;
     };
 
-    static unsigned long _ssl_id_callback() {
-        return SSLThreadInfo::get()->id();
+        struct Params {
+            Params(const std::string& pemfile,
+                   const std::string& pempwd,
+                   const std::string& cafile = "",
+                   const std::string& crlfile = "",
+                   bool weakCertificateValidation = false,
+                   bool fipsMode = false) :
+                pemfile(pemfile),
+                pempwd(pempwd),
+                cafile(cafile),
+                crlfile(crlfile),
+                weakCertificateValidation(weakCertificateValidation),
+                fipsMode(fipsMode) {};
+
+            std::string pemfile;
+            std::string pempwd;
+            std::string cafile;
+            std::string crlfile;
+            bool weakCertificateValidation;
+            bool fipsMode;
+        };
+
+        class SSLManager : public SSLManagerInterface {
+        public:
+            explicit SSLManager(const Params& params);
+
+            virtual ~SSLManager();
+
+            virtual SSL* connect(int fd);
+
+            virtual SSL* accept(int fd);
+
+            virtual std::string validatePeerCertificate(const SSL* ssl);
+
+            virtual void cleanupThreadLocals();
+
+            virtual std::string getSubjectName() {
+                return _subjectName;
+            }
+
+            virtual int SSL_read(SSL* ssl, void* buf, int num);
+
+            virtual int SSL_write(SSL* ssl, const void* buf, int num);
+
+            virtual unsigned long ERR_get_error();
+
+            virtual char* ERR_error_string(unsigned long e, char* buf);
+
+            virtual int SSL_get_error(const SSL* ssl, int ret);
+
+            virtual int SSL_shutdown(SSL* ssl);
+
+            virtual void SSL_free(SSL* ssl);
+
+        private:
+            SSL_CTX* _context;
+            std::string _password;
+            bool _validateCertificates;
+            bool _weakValidation;
+            std::string _subjectName;
+
+            /**
+             * creates an SSL context to be used for this file descriptor.
+             * caller must SSL_free it.
+             */
+            SSL* _secure(int fd);
+
+            /**
+             * Fetches the error text for an error code, in a thread-safe manner.
+             */
+            std::string _getSSLErrorMessage(int code);
+
+            /**
+             * Given an error code from an SSL-type IO function, logs an
+             * appropriate message and throws a SocketException
+             */
+            void _handleSSLError(int code);
+
+            /** @return true if was successful, otherwise false */
+            bool _setupPEM( const std::string& keyFile , const std::string& password );
+
+            /*
+             * Set up SSL for certificate validation by loading a CA
+             */
+            bool _setupCA(const std::string& caFile);
+
+            /*
+             * Import a certificate revocation list into our SSL context
+             * for use with validating certificates
+             */
+            bool _setupCRL(const std::string& crlFile);
+
+            /*
+             * Activate FIPS 140-2 mode, if the server started with a command line
+             * parameter.
+             */
+            void _setupFIPS();
+
+            /*
+             * Wrapper for SSL_Connect() that handles SSL_ERROR_WANT_READ,
+             * see SERVER-7940
+             */
+            int _ssl_connect(SSL* ssl);
+
+            /**
+             * Callbacks for SSL functions
+             */
+            static int password_cb( char *buf,int num, int rwflag,void *userdata );
+            static int verify_cb(int ok, X509_STORE_CTX *ctx);
+
+        };
+
+    } // namespace
+
+    MONGO_INITIALIZER(SSLManager)(InitializerContext* context) {
+        SimpleMutex::scoped_lock lck(sslManagerMtx);
+        if (cmdLine.sslOnNormalPorts) {
+            const Params params(
+                cmdLine.sslPEMKeyFile,
+                cmdLine.sslPEMKeyPassword,
+                cmdLine.sslCAFile,
+                cmdLine.sslCRLFile,
+                cmdLine.sslWeakCertificateValidation,
+                cmdLine.sslFIPSMode);
+            theSSLManager = new SSLManager(params);
+        }
+        return Status::OK();
     }
     static void _ssl_locking_callback(int mode, int type, const char *file, int line) {
         SSLThreadInfo::get()->lock_callback( mode , type , file , line );
     }
 
-    AtomicUInt SSLThreadInfo::_next;
-    std::vector<SimpleMutex*> SSLThreadInfo::_mutex;
-    boost::thread_specific_ptr<SSLThreadInfo> SSLThreadInfo::_thread;
-    
-    ////////////////////////////////////////////////////////////////
+    std::string getCertificateSubjectName(X509* cert) {
+        std::string result;
+        //TODO: Use X509_NAME_print_ex() with the XN_FLAG_RFC2253 flag instead.
+        char* asciiName = X509_NAME_oneline(X509_get_subject_name(cert), NULL, 0);
+        if (asciiName) {
+            result = asciiName;
+            free(asciiName);
+        }
+        return result;
+    }
+
+    SSLManagerInterface::~SSLManagerInterface() {}
 
     static mongo::mutex sslInitMtx("SSL Initialization");
     static bool sslInitialized(false);
@@ -179,6 +311,34 @@ namespace mongo {
 	return 1; // always succeed; we will catch the error in our get_verify_result() call
     }
 
+<<<<<<<     int SSLManager::SSL_read(SSL* ssl, void* buf, int num) {
+        return ::SSL_read(ssl, buf, num);
+    }
+
+    int SSLManager::SSL_write(SSL* ssl, const void* buf, int num) {
+        return ::SSL_write(ssl, buf, num);
+    }
+
+    unsigned long SSLManager::ERR_get_error() {
+        return ::ERR_get_error();
+    }
+
+    char* SSLManager::ERR_error_string(unsigned long e, char* buf) {
+        return ::ERR_error_string(e, buf);
+    }
+
+    int SSLManager::SSL_get_error(const SSL* ssl, int ret) {
+        return ::SSL_get_error(ssl, ret);
+    }
+
+    int SSLManager::SSL_shutdown(SSL* ssl) {
+        return ::SSL_shutdown(ssl);
+    }
+
+    void SSLManager::SSL_free(SSL* ssl) {
+        return ::SSL_free(ssl);
+    }
+
     void SSLManager::_setupFIPS() {
         // Turn on FIPS mode if requested.
         int status = FIPS_mode_set(1);
@@ -198,9 +358,13 @@ namespace mongo {
                 _getSSLErrorMessage(ERR_get_error()) << endl;
             return false;
         }
-        
-        SSL_CTX_set_default_passwd_cb_userdata( _context , this );
-        SSL_CTX_set_default_passwd_cb( _context, &SSLManager::password_cb );
+
+        // If password is empty, use default OpenSSL callback, which uses the terminal
+        // to securely request the password interactively from the user.
+        if (!password.empty()) {
+            SSL_CTX_set_default_passwd_cb_userdata( _context , this );
+            SSL_CTX_set_default_passwd_cb( _context, &SSLManager::password_cb );
+        }
         
         if ( SSL_CTX_use_PrivateKey_file( _context , keyFile.c_str() , SSL_FILETYPE_PEM ) != 1 ) {
             error() << "cannot read key file: " << keyFile << ' ' <<
@@ -214,6 +378,31 @@ namespace mongo {
                     << endl;
             return false;
         }
+ 
+        // Read the certificate subject name and store it 
+        BIO *in = BIO_new(BIO_s_file_internal());
+        if(NULL == in){
+            error() << "failed to allocate BIO object: " << 
+                _getSSLErrorMessage(ERR_get_error()) << endl;
+            return false;
+        }
+        ON_BLOCK_EXIT(BIO_free, in);
+
+        if (BIO_read_filename(in, keyFile.c_str()) <= 0){
+            error() << "cannot read key file: " << keyFile << ' ' <<
+                _getSSLErrorMessage(ERR_get_error()) << endl;
+            return false;
+        }
+
+        X509* x509 = PEM_read_bio_X509(in, NULL, &SSLManager::password_cb, this);
+        if (NULL == x509) {
+            error() << "cannot retreive certificate from keyfile: " << keyFile << ' ' <<
+                _getSSLErrorMessage(ERR_get_error()) << endl; 
+            return false;
+        }
+        ON_BLOCK_EXIT(X509_free, x509);
+        _subjectName = getCertificateSubjectName(x509);
+ 
         return true;
     }
 
@@ -250,7 +439,7 @@ namespace mongo {
             endl;
         return true;
     }
-                
+
     SSL* SSLManager::_secure(int fd) {
         // This just ensures that SSL multithreading support is set up for this thread,
         // if it's not already.
@@ -304,12 +493,12 @@ namespace mongo {
         return ssl;
     }
 
-    void SSLManager::validatePeerCertificate(const SSL* ssl) {
-        if (!_validateCertificates) return;
+    std::string SSLManager::validatePeerCertificate(const SSL* ssl) {
+        if (!_validateCertificates) return "";
 
-        X509* cert = SSL_get_peer_certificate(ssl);
+        X509* peerCert = SSL_get_peer_certificate(ssl);
 
-        if (cert == NULL) { // no certificate presented by peer
+        if (NULL == peerCert) { // no certificate presented by peer
             if (_weakValidation) {
                 warning() << "no SSL certificate provided by peer" << endl;
             }
@@ -317,9 +506,9 @@ namespace mongo {
                 error() << "no SSL certificate provided by peer; connection rejected" << endl;
                 throw SocketException(SocketException::CONNECT_ERROR, "");
             }
-            return;
+            return "";
         }
-        ON_BLOCK_EXIT(X509_free, cert);
+        ON_BLOCK_EXIT(X509_free, peerCert);
 
         long result = SSL_get_verify_result(ssl);
 
@@ -328,8 +517,9 @@ namespace mongo {
                 X509_verify_cert_error_string(result) << endl;
             throw SocketException(SocketException::CONNECT_ERROR, "");
         }
-
+ 
         // TODO: check optional cipher restriction, using cert.
+        return getCertificateSubjectName(peerCert);
     }
 
     void SSLManager::cleanupThreadLocals() {
