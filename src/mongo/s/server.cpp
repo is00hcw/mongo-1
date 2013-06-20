@@ -560,6 +560,15 @@ MONGO_INITIALIZER(CreateAuthorizationManager)(InitializerContext* context) {
     return Status::OK();
 }
 
+#ifdef MONGO_SSL
+MONGO_INITIALIZER_GENERAL(setSSLManagerType, 
+                          MONGO_NO_PREREQUISITES, 
+                          ("SSLManager"))(InitializerContext* context) {
+    isSSLServer = true;
+    return Status::OK();
+}
+#endif
+
 int mongoSMain(int argc, char* argv[], char** envp) {
     static StaticObserver staticObserver;
     if (argc < 1)

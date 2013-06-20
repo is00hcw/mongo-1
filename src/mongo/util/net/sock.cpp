@@ -717,8 +717,10 @@ namespace mongo {
         // ret < 0
 #ifdef MONGO_SSL
         if (_ssl) {
-            LOG(_logLevel) << "SSL Error ret: " << ret << " err: " << SSL_get_error(_ssl , ret) 
-                           << " " << ERR_error_string(ERR_get_error(), NULL) 
+            LOG(_logLevel) << "SSL Error ret when receiving: " << ret
+                           << " err: " << _sslManager->SSL_get_error(_ssl , ret)
+                           << " "
+                           << _sslManager->ERR_error_string(_sslManager->ERR_get_error(), NULL)
                            << endl;
             throw SocketException(SocketException::RECV_ERROR, remoteString());
         }

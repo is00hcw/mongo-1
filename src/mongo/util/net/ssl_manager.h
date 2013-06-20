@@ -56,10 +56,17 @@ namespace mongo {
         static void cleanupThreadLocals();
 
         /**
-         * Get the subject name of our own server certificate
+         * Gets the subject name of our own server certificate
          * @return the subject name.
          */
-        virtual std::string getSubjectName() = 0;
+        virtual std::string getServerSubjectName() = 0;
+
+        /**
+         * Gets the subject name of our own client certificate
+         * used for cluster authentiation
+         * @return the subject name.
+         */
+        virtual std::string getClientSubjectName() = 0;
 
         /**
          * ssl.h shims
@@ -110,5 +117,7 @@ namespace mongo {
          */
         void _initializeSSL(const SSLParams& params);
     };
+
+    extern bool isSSLServer;
 }
 #endif

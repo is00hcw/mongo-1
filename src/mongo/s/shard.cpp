@@ -415,14 +415,13 @@ namespace mongo {
 
     void ShardingConnectionHook::onCreate( DBClientBase * conn ) {
         if(AuthorizationManager::isAuthEnabled()) {
-            bool result;
-            string err;
             LOG(2) << "calling onCreate auth for " << conn->toString() << endl;
 
             bool result = authenticateInternalUser(conn);
 
             uassert( 15847, str::stream() << "can't authenticate to server "
-                                          << conn->getServerAddress() << causedBy( err ), result );
+                                          << conn->getServerAddress(), 
+                     result );
         }
 
         if ( _shardedConnections && versionManager.isVersionableCB( conn ) ) {
