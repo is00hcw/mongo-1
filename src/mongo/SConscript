@@ -538,7 +538,8 @@ env.CppUnitTest("shard_conn_test", [ "s/shard_conn_test.cpp" ], LIBS=env['LIBS']
                     "coredb",
                     "dbcmdline",
                     "mongodandmongos",
-                    "mocklib"],
+                    "mocklib",
+                    "$BUILD_DIR/mongo/db/auth/authmocks"],
                  NO_CRUTCH=True)
 
 
@@ -612,8 +613,10 @@ Default( mongod )
 
 # tools
 allToolFiles = [ "tools/tool.cpp", "tools/stat_util.cpp" ]
-env.StaticLibrary("alltools", allToolFiles, LIBDEPS=["serveronly", "coreserver", "coredb",
-                                                     "notmongodormongos"])
+env.StaticLibrary("alltools", allToolFiles, LIBDEPS=["serveronly",
+                                                     "coreserver",
+                                                     "coredb",
+                                                     "$BUILD_DIR/mongo/db/auth/authmocks"])
 
 normalTools = [ "dump", "restore", "export", "import", "stat", "top", "2toku"]
 env.Alias( "tools", [ "#/${PROGPREFIX}mongo" + x + "${PROGSUFFIX}" for x in normalTools ] )
@@ -675,8 +678,13 @@ test = testEnv.Install(
                        "gridfs",
                        "notmongodormongos",
                        "s/upgrade",
+<<<<<<< HEAD
                        "mocklib"]))
 addBuildRpath(env, test)
+=======
+                       "mocklib",
+                       "$BUILD_DIR/mongo/db/auth/authmocks"]))
+>>>>>>> 90f1d89... SERVER-9518 Initial implementation of acquire/releaseUser methods in AuthorizationManager
 
 if len(testEnv.subst('$PROGSUFFIX')):
     testEnv.Alias( "test", "#/${PROGPREFIX}test${PROGSUFFIX}" )
