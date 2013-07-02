@@ -224,7 +224,8 @@ namespace mongo {
         try {
             if (!NamespaceString::isCommand(d.getns())) {
                 // Auth checking for Commands happens later.
-                Status status = cc().getAuthorizationSession()->checkAuthForQuery(d.getns());
+                Status status = cc().getAuthorizationSession()->checkAuthForQuery(d.getns(),
+                                                                                  q.query);
                 uassert(16550, status.reason(), status.isOK());
             }
             dbresponse.exhaustNS = runQuery(m, q, op, *resp);
@@ -558,7 +559,10 @@ namespace mongo {
         const bool multi = flags & UpdateOption_Multi;
         const bool broadcast = flags & UpdateOption_Broadcast;
 
-        Status status = cc().getAuthorizationSession()->checkAuthForUpdate(ns, upsert);
+        Status status = cc().getAuthorizationSession()->checkAuthForUpdate(ns,
+                                                                           query,
+                                                                           toupdate,
+                                                                           upsert);
         uassert(16538, status.reason(), status.isOK());
 
         OpSettings settings;
@@ -586,13 +590,13 @@ namespace mongo {
         DbMessage d(m);
         const char *ns = d.getns();
 
-        Status status = cc().getAuthorizationSession()->checkAuthForDelete(ns);
-        uassert(16542, status.reason(), status.isOK());
-
         op.debug().ns = ns;
         int flags = d.pullInt();
         verify(d.moreJSObjs());
         BSONObj pattern = d.nextJsObj();
+        
+        Status status = cc().getAuthorizationSession()->checkAuthForDelete(ns, pattern);
+        uassert(16542, status.reason(), status.isOK());
 
         op.debug().query = pattern;
         op.setQuery(pattern);
@@ -662,7 +666,7 @@ namespace mongo {
             try {
                 uassert( 16258, str::stream() << "Invalid ns [" << ns << "]", NamespaceString::isValid(ns) );
 
-                Status status = cc().getAuthorizationSession()->checkAuthForGetMore(ns);
+                Status status = cc().getAuthorizationSession()->checkAuthForGetMore(ns, cursorid);
                 uassert(16543, status.reason(), status.isOK());
 
                 // I (Zardosht), am not crazy about this, but I cannot think of
@@ -920,6 +924,7 @@ namespace mongo {
         const char *ns = d.getns();
         op.debug().ns = ns;
 
+<<<<<<< HEAD
         StringData coll = nsToCollectionSubstring(ns);
         bool isIndexWrite = coll == "system.indexes";
 
@@ -930,6 +935,9 @@ namespace mongo {
         }
 
         if (!d.moreJSObjs()) {
+=======
+        if( !d.moreJSObjs() ) {
+>>>>>>> 0243580... SERVER-9740 Make all the CRUD checkAuthFor* methods take in all the information about the operation.
             // strange.  should we complain?
             return;
         }
@@ -937,6 +945,7 @@ namespace mongo {
         vector<BSONObj> objs;
         while (d.moreJSObjs()){
             BSONObj obj = d.nextJsObj();
+<<<<<<< HEAD
             objs.push_back(obj);
             if (isIndexWrite) {
                 string indexNS = obj.getStringField("ns");
@@ -946,6 +955,14 @@ namespace mongo {
                         cc().getAuthorizationSession()->checkAuthorization(
                                 indexNS, ActionType::ensureIndex));
             }
+=======
+            multi.push_back(obj);
+
+            // Check auth for insert (also handles checking if this is an index build and checks
+            // for the proper privileges in that case).
+            Status status = cc().getAuthorizationSession()->checkAuthForInsert(ns, obj);
+            uassert(16544, status.reason(), status.isOK());
+>>>>>>> 0243580... SERVER-9740 Make all the CRUD checkAuthFor* methods take in all the information about the operation.
         }
 
         const bool keepGoing = d.reservedField() & InsertOption_ContinueOnError;
