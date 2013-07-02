@@ -50,6 +50,7 @@
 #include "mongo/db/command_cursors.h"
 #include "mongo/db/commands/rename_collection.h"
 #include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/shutdown.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/collection_map.h"
