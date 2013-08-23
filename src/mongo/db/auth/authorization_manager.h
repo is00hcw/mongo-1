@@ -252,6 +252,39 @@ namespace mongo {
         Status _initializeUserFromPrivilegeDocument(User* user,
                                                     const BSONObj& privDoc) const;
 
+        /**
+         * Upgrades authorization data stored in collections from the v1 form (one system.users
+         * collection per database) to the v2 form (a single admin.system.users collection).
+         *
+         * Returns Status::OK() if the AuthorizationManager and the admin.system.version collection
+         * agree that the system is already upgraded, or if the upgrade completes successfully.
+         *
+         * This method will create and destroy an admin._newusers collection in addition to writing
+         * to admin.system.users and admin.system.version.
+         *
+         * User information is taken from the in-memory user cache, constructed at start-up.  This
+         * is safe to do because MongoD and MongoS build complete copies of the data stored in
+         * *.system.users at start-up if they detect that the upgrade has not yet completed.
+         */
+        Status upgradeAuthCollections();
+
+    private:
+
+        /**
+         * Returns the current version number of the authorization system.  Should only be called
+         * when holding _lock.
+         */
+        int _getVersion_inlock() const { return _version; }
+
+        /**
+         * Invalidates all User objects in the cache and removes them from the cache.
+         * Should only be called when already holding _lock.
+         * TODO(spencer): This only exists because we're currently calling initializeAllV1UserData
+         * every time user data is changed.  Once we only call that once at startup, this function
+         * should be removed.
+         */
+        void _invalidateUserCache_inlock();
+
 
         static bool _doesSupportOldStylePrivileges;
 

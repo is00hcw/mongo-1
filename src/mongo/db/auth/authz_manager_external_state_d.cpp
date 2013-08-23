@@ -32,17 +32,19 @@ namespace mongo {
     AuthzManagerExternalStateMongod::~AuthzManagerExternalStateMongod() {}
 
     Status AuthzManagerExternalStateMongod::insertPrivilegeDocument(const string& dbname,
-                                                                    const BSONObj& userObj) const {
-        string userNS = dbname + ".system.users";
-        DBDirectClient client;
-        {
-            Client::GodScope gs;
-            // TODO(spencer): Once we're no longer fully rebuilding the user cache on every change
-            // to user data we should remove the global lock and uncomment the WriteContext below
-            Lock::GlobalWrite w;
-            // Client::WriteContext ctx(userNS);
-            client.insert(userNS, userObj);
-        }
+                                                                    const BSONObj& userObj) {
+        try {
+            string userNS = dbname + ".system.users";
+            DBDirectClient client;
+            {
+                Client::GodScope gs;
+                // TODO(spencer): Once we're no longer fully rebuilding the user cache on every
+                // change to user data we should remove the global lock and uncomment the
+                // WriteContext below
+                Lock::GlobalWrite w;
+                // Client::WriteContext ctx(userNS);
+                client.insert(userNS, userObj);
+            }
 
         // 30 second timeout for w:majority
         BSONObj res = client.getLastErrorDetailed(false, false, -1, 30*1000);
@@ -59,26 +61,81 @@ namespace mongo {
     }
 
     Status AuthzManagerExternalStateMongod::updatePrivilegeDocument(
-            const UserName& user, const BSONObj& updateObj) const {
-        string userNS = mongoutils::str::stream() << user.getDB() << ".system.users";
-        DBDirectClient client;
-        {
-            Client::GodScope gs;
-            // TODO(spencer): Once we're no longer fully rebuilding the user cache on every change
-            // to user data we should remove the global lock and uncomment the WriteContext below
-            Lock::GlobalWrite w;
-            // Client::WriteContext ctx(userNS);
-            client.update(userNS,
-                          QUERY("user" << user.getUser() << "userSource" << BSONNULL),
-                          updateObj);
+            const UserName& user, const BSONObj& updateObj) {
+        try {
+            string userNS = mongoutils::str::stream() << user.getDB() << ".system.users";
+            DBDirectClient client;
+            {
+                Client::GodScope gs;
+                // TODO(spencer): Once we're no longer fully rebuilding the user cache on every
+                // change to user data we should remove the global lock and uncomment the
+                // WriteContext below
+                Lock::GlobalWrite w;
+                // Client::WriteContext ctx(userNS);
+                client.update(userNS,
+                              QUERY("user" << user.getUser() << "userSource" << BSONNULL),
+                              updateObj);
+            }
+
+            // 30 second timeout for w:majority
+            BSONObj res = client.getLastErrorDetailed(false, false, -1, 30*1000);
+            string err = client.getLastErrorString(res);
+            if (!err.empty()) {
+                return Status(ErrorCodes::UserModificationFailed, err);
+            }
+
+            int numUpdated = res["n"].numberInt();
+            dassert(numUpdated <= 1 && numUpdated >= 0);
+            if (numUpdated == 0) {
+                return Status(ErrorCodes::UserNotFound,
+                              mongoutils::str::stream() << "User " << user.getFullName() <<
+                                      " not found");
+            }
+
+            return Status::OK();
+        } catch (const DBException& e) {
+            return e.toStatus();
         }
 
-        // 30 second timeout for w:majority
-        BSONObj res = client.getLastErrorDetailed(false, false, -1, 30*1000);
-        string err = client.getLastErrorString(res);
-        if (!err.empty()) {
-            return Status(ErrorCodes::UserModificationFailed, err);
+    Status AuthzManagerExternalStateMongod::removePrivilegeDocuments(const string& dbname,
+                                                                     const BSONObj& query) {
+        try {
+            string userNS = dbname + ".system.users";
+            DBDirectClient client;
+            {
+                Client::GodScope gs;
+                // TODO(spencer): Once we're no longer fully rebuilding the user cache on every
+                // change to user data we should remove the global lock and uncomment the
+                // WriteContext below
+                Lock::GlobalWrite w;
+                // Client::WriteContext ctx(userNS);
+                client.remove(userNS, query);
+            }
+
+            // 30 second timeout for w:majority
+            BSONObj res = client.getLastErrorDetailed(false, false, -1, 30*1000);
+            string errstr = client.getLastErrorString(res);
+            if (!errstr.empty()) {
+                return Status(ErrorCodes::UserModificationFailed, errstr);
+            }
+
+            int numUpdated = res["n"].numberInt();
+            if (numUpdated == 0) {
+                return Status(ErrorCodes::UserNotFound,
+                              mongoutils::str::stream() << "No users found on database \"" << dbname
+                                      << "\" matching query: " << query.toString());
+            }
+            return Status::OK();
+        } catch (const DBException& e) {
+            return e.toStatus();
         }
+    }
+
+    Status AuthzManagerExternalStateMongod::_findUser(const string& usersNamespace,
+                                                      const BSONObj& query,
+                                                      BSONObj* result) {
+        Client::GodScope gs;
+        Client::ReadContext ctx(usersNamespace);
 
         int numUpdated = res["n"].numberInt();
         dassert(numUpdated <= 1 && numUpdated >= 0);
@@ -88,29 +145,81 @@ namespace mongo {
                                   " not found");
         }
 
+    Status AuthzManagerExternalStateMongod::getAllDatabaseNames(
+            std::vector<std::string>* dbnames) {
+        Lock::GlobalWrite lk;
+        getDatabaseNames(*dbnames);
         return Status::OK();
     }
 
-    bool AuthzManagerExternalStateMongod::_findUser(const string& usersNamespace,
-                                                    const BSONObj& query,
-                                                    BSONObj* result) const {
-        bool ok = false;
-        try {
-            Client::GodScope gs;
-            LOCK_REASON(lockReason, "auth: looking up user");
-            Client::ReadContext ctx(usersNamespace, lockReason);
-            // we want all authentication stuff to happen on an alternate stack
-            Client::AlternateTransactionStack altStack;
-            Client::Transaction txn(DB_TXN_SNAPSHOT | DB_TXN_READ_ONLY);
-            BSONObj tmpresult;
-            ok = Collection::findOne(usersNamespace, query, result != NULL ? *result : tmpresult);
-            if (ok) {
-                txn.commit();
-            }
-        } catch (storage::LockException &e) {
-            LOG(1) << "Couldn't read from system.users because of " << e.what() << ", assuming it's empty.";
-        }
-        return ok;
+    Status AuthzManagerExternalStateMongod::getAllV1PrivilegeDocsForDB(
+            const std::string& dbname, std::vector<BSONObj>* privDocs) {
+        std::string usersNamespace = dbname + ".system.users";
+
+        Client::GodScope gs;
+        Client::ReadContext ctx(usersNamespace);
+
+        *privDocs = Helpers::findAll(usersNamespace, BSONObj());
+        return Status::OK();
+    }
+
+    Status AuthzManagerExternalStateMongod::findOne(
+            const NamespaceString& collectionName,
+            const BSONObj& query,
+            BSONObj* result) {
+        fassertFailed(17091);
+    }
+
+    Status AuthzManagerExternalStateMongod::insert(
+            const NamespaceString& collectionName,
+            const BSONObj& document) {
+        fassertFailed(17092);
+    }
+
+    Status AuthzManagerExternalStateMongod::updateOne(
+            const NamespaceString& collectionName,
+            const BSONObj& query,
+            const BSONObj& updatePattern,
+            bool upsert) {
+        fassertFailed(17093);
+    }
+
+    Status AuthzManagerExternalStateMongod::remove(
+            const NamespaceString& collectionName,
+            const BSONObj& query) {
+        fassertFailed(17094);
+    }
+
+    Status AuthzManagerExternalStateMongod::createIndex(
+            const NamespaceString& collectionName,
+            const BSONObj& pattern,
+            bool unique) {
+        fassertFailed(17095);
+    }
+
+    Status AuthzManagerExternalStateMongod::dropCollection(
+            const NamespaceString& collectionName) {
+        fassertFailed(17096);
+    }
+
+    Status AuthzManagerExternalStateMongod::renameCollection(
+            const NamespaceString& oldName,
+            const NamespaceString& newName) {
+        fassertFailed(17097);
+    }
+
+    Status AuthzManagerExternalStateMongod::copyCollection(
+            const NamespaceString& fromName,
+            const NamespaceString& toName) {
+        fassertFailed(17098);
+    }
+
+    bool AuthzManagerExternalStateMongod::tryLockUpgradeProcess() {
+        fassertFailed(17099);
+    }
+
+    void AuthzManagerExternalStateMongod::unlockUpgradeProcess() {
+        fassertFailed(17100);
     }
 
 } // namespace mongo

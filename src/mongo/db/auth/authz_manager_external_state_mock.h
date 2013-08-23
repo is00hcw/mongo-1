@@ -17,12 +17,14 @@
 #pragma once
 
 #include <string>
+#include <map>
+#include <vector>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/db/auth/authz_manager_external_state.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/platform/unordered_map.h"
+#include "mongo/db/namespace_string.h"
 
 namespace mongo {
 
@@ -36,25 +38,64 @@ namespace mongo {
 
         AuthzManagerExternalStateMock() {};
 
-        // no-op for the mock
         virtual Status insertPrivilegeDocument(const std::string& dbname,
-                                               const BSONObj& userObj) const;
+                                               const BSONObj& userObj);
 
-        // no-op for the mock
         virtual Status updatePrivilegeDocument(const UserName& user,
-                                               const BSONObj& updateObj) const;
+                                               const BSONObj& updateObj);
 
-        // Non-const version that puts document into a vector that can be accessed later
-        Status insertPrivilegeDocument(const std::string& dbname, const BSONObj& userObj);
+        virtual Status removePrivilegeDocuments(const std::string& dbname,
+                                                const BSONObj& query);
 
         void clearPrivilegeDocuments();
 
-        virtual bool _findUser(const std::string& usersNamespace,
+        virtual Status getAllDatabaseNames(std::vector<std::string>* dbnames);
+
+        virtual Status getAllV1PrivilegeDocsForDB(const std::string& dbname,
+                                                  std::vector<BSONObj>* privDocs);
+
+        virtual Status _findUser(const std::string& usersNamespace,
+                                 const BSONObj& query,
+                                 BSONObj* result);
+
+        virtual Status findOne(const NamespaceString& collectionName,
                                const BSONObj& query,
-                               BSONObj* result) const;
+                               BSONObj* result);
+
+        // This implementation does not understand uniqueness constraints.
+        virtual Status insert(const NamespaceString& collectionName,
+                              const BSONObj& document);
+
+        // This implementation does not understand uniqueness constraints,
+        // and only correctly handles some upsert behaviors.
+        virtual Status updateOne(const NamespaceString& collectionName,
+                                 const BSONObj& query,
+                                 const BSONObj& updatePattern,
+                                 bool upsert);
+        virtual Status remove(const NamespaceString& collectionName,
+                              const BSONObj& query);
+        virtual Status createIndex(const NamespaceString& collectionName,
+                                   const BSONObj& pattern,
+                                   bool unique);
+        virtual Status dropCollection(const NamespaceString& collectionName);
+        virtual Status renameCollection(const NamespaceString& oldName,
+                                        const NamespaceString& newName);
+        virtual Status copyCollection(const NamespaceString& fromName,
+                                      const NamespaceString& toName);
+        virtual bool tryLockUpgradeProcess();
+        virtual void unlockUpgradeProcess();
+
+        std::vector<BSONObj> getCollectionContents(const NamespaceString& collectionName);
 
     private:
-        unordered_map<std::string, BSONObj> _userDocuments; // dbname to user document
+        typedef std::vector<BSONObj> BSONObjCollection;
+        typedef std::map<NamespaceString, BSONObjCollection> NamespaceDocumentMap;
+
+        Status _findOneIter(const NamespaceString& collectionName,
+                            const BSONObj& query,
+                            BSONObjCollection::iterator* result);
+
+        NamespaceDocumentMap _documents; // Mock database.
     };
 
 } // namespace mongo

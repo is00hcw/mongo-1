@@ -75,11 +75,11 @@ namespace {
                                const BSONObj& query,
                                BSONObj* result) const {
 
-            std::string dbstr = nsToDatabase(usersNamespace);
-            std::string user = query[AuthorizationManager::USER_NAME_FIELD_NAME].String();
-            std::string userSource;
-            if (!query[AuthorizationManager::USER_SOURCE_FIELD_NAME].trueValue()) {
-                userSource = dbstr;
+        virtual Status _findUser(const std::string& usersNamespace,
+                                 const BSONObj& query,
+                                 BSONObj* result) {
+            if (_findsShouldFail) {
+                return Status(ErrorCodes::UnknownError, "_findUser set to fail in mock.");
             }
             else {
                 userSource = query[AuthorizationManager::USER_SOURCE_FIELD_NAME].String();

@@ -22,6 +22,7 @@
 #include "mongo/base/status.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/namespace_string.h"
 
 namespace mongo {
 
@@ -37,131 +38,126 @@ namespace mongo {
 
         virtual ~AuthzManagerExternalState();
 
-        /**
-         * Initializes the external state object.  Must be called after construction and before
-         * calling other methods.  Object may not be used after this method returns something other
-         * than Status::OK().
-         */
-        virtual Status initialize() = 0;
+        // Gets the privilege information document for "userName".  authzVersion indicates what
+        // version of the privilege document format is being used, which is needed to know how to
+        // query for the user's privilege document.
+        //
+        // On success, returns Status::OK() and stores a shared-ownership copy of the document into
+        // "result".
+        Status getPrivilegeDocument(const UserName& userName,
+                                    int authzVersion,
+                                    BSONObj* result);
 
-        /**
-         * Retrieves the schema version of the persistent data describing users and roles.
-         * Will leave *outVersion unmodified on non-OK status return values.
-         */
-        virtual Status getStoredAuthorizationVersion(int* outVersion) = 0;
+        // Returns true if there exists at least one privilege document in the system.
+        bool hasAnyPrivilegeDocuments();
 
-        /**
-         * Writes into "result" a document describing the named user and returns Status::OK().  The
-         * description includes the user credentials, if present, the user's role membership and
-         * delegation information, a full list of the user's privileges, and a full list of the
-         * user's roles, including those roles held implicitly through other roles (indirect roles).
-         * In the event that some of this information is inconsistent, the document will contain a
-         * "warnings" array, with string messages describing inconsistencies.
-         *
-         * If the user does not exist, returns ErrorCodes::UserNotFound.
-         */
-        virtual Status getUserDescription(const UserName& userName, BSONObj* result) = 0;
+        // Creates the given user object in the given database.
+        // TODO(spencer): remove dbname argument once users are only written into the admin db
+        virtual Status insertPrivilegeDocument(const std::string& dbname,
+                                               const BSONObj& userObj) = 0;
 
-        /**
-         * Writes into "result" a document describing the named role and returns Status::OK().  The
-         * description includes the roles in which the named role has membership and a full list of
-         * the roles of which the named role is a member, including those roles memberships held
-         * implicitly through other roles (indirect roles). If "showPrivileges" is true, then the
-         * description documents will also include a full list of the role's privileges.
-         * In the event that some of this information is inconsistent, the document will contain a
-         * "warnings" array, with string messages describing inconsistencies.
-         *
-         * If the role does not exist, returns ErrorCodes::RoleNotFound.
-         */
-        virtual Status getRoleDescription(const RoleName& roleName,
-                                          bool showPrivileges,
-                                          BSONObj* result) = 0;
+        // Updates the given user object with the given update modifier.
+        virtual Status updatePrivilegeDocument(const UserName& user,
+                                               const BSONObj& updateObj) = 0;
 
-        /**
-         * Writes into "result" documents describing the roles that are defined on the given
-         * database. Each role description document includes the other roles in which the role has
-         * membership and a full list of the roles of which the named role is a member,
-         * including those roles memberships held implicitly through other roles (indirect roles).
-         * If showPrivileges is true, then the description documents will also include a full list
-         * of the role's privileges.  If showBuiltinRoles is true, then the result array will
-         * contain description documents for all the builtin roles for the given database, if it
-         * is false the result will just include user defined roles.
-         * In the event that some of the information in a given role description is inconsistent,
-         * the document will contain a "warnings" array, with string messages describing
-         * inconsistencies.
-         */
-        virtual Status getRoleDescriptionsForDB(const std::string dbname,
-                                                bool showPrivileges,
-                                                bool showBuiltinRoles,
-                                                vector<BSONObj>* result) = 0;
-
-        /**
-         * Gets the privilege document for "userName" stored in the system.users collection of
-         * database "dbname".  Useful only for schemaVersion24 user documents.  For newer schema
-         * versions, use getUserDescription().
-         *
-         * On success, returns Status::OK() and stores a shared-ownership copy of the document into
-         * "result".
-         */
-        Status getPrivilegeDocumentV1(
-                const StringData& dbname, const UserName& userName, BSONObj* result);
+        // Removes users for the given database matching the given query.
+        // TODO(spencer): remove dbname argument once users are only written into the admin db
+        virtual Status removePrivilegeDocuments(const std::string& dbname,
+                                                const BSONObj& query) = 0;
 
         /**
          * Returns true if there exists at least one privilege document in the system.
          */
-        bool hasAnyPrivilegeDocuments();
+        virtual Status getAllDatabaseNames(std::vector<std::string>* dbnames) = 0;
 
         /**
          * Creates the given user object in the given database.
          *
          * TODO(spencer): remove dbname argument once users are only written into the admin db
          */
-        Status insertPrivilegeDocument(const std::string& dbname,
-                                       const BSONObj& userObj,
-                                       const BSONObj& writeConcern);
+        virtual Status getAllV1PrivilegeDocsForDB(const std::string& dbname,
+                                                  std::vector<BSONObj>* privDocs) = 0;
 
         /**
-         * Updates the given user object with the given update modifier.
+         * Finds a document matching "query" in "collectionName", and store a shared-ownership
+         * copy into "result".
+         *
+         * Returns Status::OK() on success.  If no match is found, returns
+         * ErrorCodes::NoMatchingDocument.  Other errors returned as appropriate.
          */
-        Status updatePrivilegeDocument(const UserName& user,
-                                       const BSONObj& updateObj,
-                                       const BSONObj& writeConcern);
+        virtual Status findOne(const NamespaceString& collectionName,
+                               const BSONObj& query,
+                               BSONObj* result) = 0;
 
         /**
-         * Removes users for the given database matching the given query.
-         * Writes into *numRemoved the number of user documents that were modified.
+         * Inserts "document" into "collectionName".
          */
-        Status removePrivilegeDocuments(const BSONObj& query,
-                                        const BSONObj& writeConcern,
-                                        int* numRemoved);
+        virtual Status insert(const NamespaceString& collectionName,
+                              const BSONObj& document) = 0;
 
         /**
-         * Puts into the *dbnames vector the name of every database in the cluster.
-         * May take a global lock, so should only be called during startup.
+         * Update one document matching "query" according to "updatePattern" in "collectionName".
+         *
+         * If "upsert" is true and no document matches "query", inserts one using "query" as a
+         * template.
          */
-        virtual Status getAllDatabaseNames(std::vector<std::string>* dbnames) = 0;
+        virtual Status updateOne(const NamespaceString& collectionName,
+                                 const BSONObj& query,
+                                 const BSONObj& updatePattern,
+                                 bool upsert) = 0;
 
+        /**
+         * Removes all documents matching "query" from "collectionName".
+         */
+        virtual Status remove(const NamespaceString& collectionName,
+                              const BSONObj& query) = 0;
 
-        // Returns true if there exists at least one privilege document in the given database.
-        bool hasPrivilegeDocument(const std::string& dbname) const;
+        /**
+         * Creates an index with the given pattern on "collectionName".
+         */
+        virtual Status createIndex(const NamespaceString& collectionName,
+                                   const BSONObj& pattern,
+                                   bool unique) = 0;
 
-        // Creates the given user object in the given database.
-        virtual Status insertPrivilegeDocument(const std::string& dbname,
-                                               const BSONObj& userObj) const = 0;
+        /**
+         * Drops the named collection.
+         */
+        virtual Status dropCollection(const NamespaceString& collectionName) = 0;
 
-        // Updates the given user object with the given update modifier.
-        virtual Status updatePrivilegeDocument(const UserName& user,
-                                               const BSONObj& updateObj) const = 0;
+        /**
+         * Renames collection "oldName" to "newName", possibly dropping the previous
+         * collection named "newName".
+         */
+        virtual Status renameCollection(const NamespaceString& oldName,
+                                        const NamespaceString& newName) = 0;
+
+        /**
+         * Copies the contents of collection "fromName" into "toName".  Fails
+         * if "toName" is already a collection.
+         */
+        virtual Status copyCollection(const NamespaceString& fromName,
+                                      const NamespaceString& toName) = 0;
+
+        /**
+         * Tries to acquire the global lock guarding the upgrade process.
+         */
+        virtual bool tryLockUpgradeProcess() = 0;
+
+        /**
+         * Releases the lock guarding the upgrade process, which must already be held.
+         */
+        virtual void unlockUpgradeProcess() = 0;
 
     protected:
         AuthzManagerExternalState(); // This class should never be instantiated directly.
 
         // Queries the userNamespace with the given query and returns the privilegeDocument found
-        // in *result.  Returns true if it finds a document matching the query, or false if not.
-        virtual bool _findUser(const std::string& usersNamespace,
-                               const BSONObj& query,
-                               BSONObj* result) const = 0;
-
+        // in *result.  Returns Status::OK if it finds a document matching the query.  If it doesn't
+        // find a document matching the query, returns a Status with code UserNotFound.  Other
+        // errors may return other Status codes.
+        virtual Status _findUser(const std::string& usersNamespace,
+                                 const BSONObj& query,
+                                 BSONObj* result) = 0;
     };
 
 } // namespace mongo
