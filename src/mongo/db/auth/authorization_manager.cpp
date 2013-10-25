@@ -255,27 +255,137 @@ namespace {
         return Status::OK();
     }
 
-    static inline Status _oldPrivilegeFormatNotSupported() {
-        return Status(ErrorCodes::UnsupportedFormat,
-                      "Support for compatibility-form privilege documents disabled; "
-                      "All system.users entries must contain a 'roles' field");
-    }
+    bool AuthorizationManager::_doesSupportOldStylePrivileges = true;
 
-    static inline Status _badValue(const char* reason, int location) {
-        return Status(ErrorCodes::BadValue, reason, location);
-    }
+    /**
+     * Guard object for synchronizing accesses to data cached in AuthorizationManager instances.
+     * This guard allows one thread to access the cache at a time, and provides an exception-safe
+     * mechanism for a thread to release the cache mutex while performing network or disk operations
+     * while allowing other readers to proceed.
+     *
+     * There are two ways to use this guard.  One may simply instantiate the guard like a
+     * std::lock_guard, and perform reads or writes of the cache.
+     *
+     * Alternatively, one may instantiate the guard, examine the cache, and then enter into an
+     * update mode by first wait()ing until otherUpdateInFetchPhase() is false, and then
+     * calling beginFetchPhase().  At this point, other threads may acquire the guard in the simple
+     * manner and do reads, but other threads may not enter into a fetch phase.  During the fetch
+     * phase, the thread should perform required network or disk activity to determine what update
+     * it will make to the cache.  Then, it should call endFetchPhase(), to reacquire the user cache
+     * mutex.  At that point, the thread can make its modifications to the cache and let the guard
+     * go out of scope.
+     *
+     * All updates by guards using a fetch-phase are totally ordered with respect to one another,
+     * and all guards using no fetch phase are totally ordered with respect to one another, but
+     * there is not a total ordering among all guard objects.
+     *
+     * The cached data has an associated counter, called the cache generation.  If the cache
+     * generation changes while a guard is in fetch phase, the fetched data should not be stored
+     * into the cache, because some invalidation event occurred during the fetch phase.
+     *
+     * NOTE: It is not safe to enter fetch phase while holding a database lock.  Fetch phase
+     * operations are allowed to acquire database locks themselves, so entering fetch while holding
+     * a database lock may lead to deadlock.
+     */
+    class AuthorizationManager::CacheGuard {
+        MONGO_DISALLOW_COPYING(CacheGuard);
+    public:
+        enum FetchSynchronization {
+            fetchSynchronizationAutomatic,
+            fetchSynchronizationManual
+        };
 
-    static inline Status _badValue(const std::string& reason, int location) {
-        return Status(ErrorCodes::BadValue, reason, location);
-    }
+        /**
+         * Constructs a cache guard, locking the mutex that synchronizes user cache accesses.
+         */
+        CacheGuard(AuthorizationManager* authzManager,
+                   const FetchSynchronization sync = fetchSynchronizationAutomatic) :
+            _isThisGuardInFetchPhase(false),
+            _authzManager(authzManager),
+            _lock(authzManager->_cacheMutex) {
+
+            if (fetchSynchronizationAutomatic == sync) {
+                synchronizeWithFetchPhase();
+            }
+        }
+
+        /**
+         * Releases the mutex that synchronizes user cache access, if held, and notifies
+         * any threads waiting for their own opportunity to update the user cache.
+         */
+        ~CacheGuard() {
+            if (!_lock.owns_lock()) {
+                _lock.lock();
+            }
+            if (_isThisGuardInFetchPhase) {
+                fassert(17190, _authzManager->_isFetchPhaseBusy);
+                _authzManager->_isFetchPhaseBusy = false;
+                _authzManager->_fetchPhaseIsReady.notify_all();
+            }
+        }
+
+        /**
+         * Returns true of the authzManager reports that it is in fetch phase.
+         */
+        bool otherUpdateInFetchPhase() { return _authzManager->_isFetchPhaseBusy; }
+
+        /**
+         * Waits on the _authzManager->_fetchPhaseIsReady condition.
+         */
+        void wait() {
+            fassert(0, !_isThisGuardInFetchPhase);
+            _authzManager->_fetchPhaseIsReady.wait(_lock);
+        }
+
+        /**
+         * Enters fetch phase, releasing the _authzManager->_cacheMutex after recording the current
+         * cache generation.
+         */
+        void beginFetchPhase() {
+            fassert(17191, !_authzManager->_isFetchPhaseBusy);
+            _isThisGuardInFetchPhase = true;
+            _authzManager->_isFetchPhaseBusy = true;
+            _startGeneration = _authzManager->_cacheGeneration;
+            _lock.unlock();
+        }
+
+        /**
+         * Exits the fetch phase, reacquiring the _authzManager->_cacheMutex.
+         */
+        void endFetchPhase() {
+            _lock.lock();
+            _isThisGuardInFetchPhase = false;
+            _authzManager->_isFetchPhaseBusy = false;
+        }
+
+        /**
+         * Returns true if _authzManager->_cacheGeneration remained the same while this guard was
+         * in fetch phase.  Behavior is undefined if this guard never entered fetch phase.
+         *
+         * If this returns true, do not update the cached data with this
+         */
+        bool isSameCacheGeneration() const {
+            fassert(0, !_isThisGuardInFetchPhase);
+            return _startGeneration == _authzManager->_cacheGeneration;
+        }
 
     static inline StringData makeStringDataFromBSONElement(const BSONElement& element) {
         return StringData(element.valuestr(), element.valuestrsize() - 1);
     }
 
+        uint64_t _startGeneration;
+        bool _isThisGuardInFetchPhase;
+        AuthorizationManager* _authzManager;
+        boost::unique_lock<boost::mutex> _lock;
+    };
 
     AuthorizationManager::AuthorizationManager(AuthzManagerExternalState* externalState) :
-            _version(1), _externalState(externalState) {}
+        _authEnabled(false),
+        _externalState(externalState),
+        _version(2),
+        _cacheGeneration(0),
+        _isFetchPhaseBusy(false) {
+    }
 
     AuthorizationManager::~AuthorizationManager() {
         for (unordered_map<UserName, User*>::iterator it = _userCache.begin();
@@ -284,28 +394,23 @@ namespace {
         }
     }
 
-    Status AuthorizationManager::getAuthorizationVersion(int* version) {
+    int AuthorizationManager::getAuthorizationVersion() {
         CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
         int newVersion = _version;
-        if (schemaVersionInvalid == newVersion) {
-            while (guard.otherUpdateInFetchPhase())
-                guard.wait();
+        if (0 == newVersion) {
             guard.beginFetchPhase();
             Status status = _externalState->getStoredAuthorizationVersion(&newVersion);
             guard.endFetchPhase();
-            if (!status.isOK()) {
-                warning() << "Problem fetching the stored schema version of authorization data: "
-                          << status;
-                *version = schemaVersionInvalid;
-                return status;
+            if (status.isOK()) {
+                if (guard.isSameCacheGeneration()) {
+                    _version = newVersion;
+                }
             }
-
-            if (guard.isSameCacheGeneration()) {
-                _version = newVersion;
+            else {
+                warning() << "Could not determine schema version of authorization data. " << status;
             }
         }
-        *version = newVersion;
-        return Status::OK();
+        return newVersion;
     }
 
     void AuthorizationManager::setSupportOldStylePrivilegeDocuments(bool enabled) {
@@ -688,34 +793,189 @@ namespace {
             return Status::OK();
         }
 
-        // Put the new user into an auto_ptr temporarily in case there's an error while
-        // initializing the user.
-        auto_ptr<User> userHolder(new User(userName));
-        User* user = userHolder.get();
+        std::auto_ptr<User> user;
 
-        BSONObj userObj;
-        if (_version == 1) {
-            Status status = _externalState->getPrivilegeDocument(userName.getDB().toString(),
-                                                                 userName,
-                                                                 &userObj);
-            if (!status.isOK()) {
+        int authzVersion = _version;
+        guard.beginFetchPhase();
+        if (authzVersion == 0) {
+            Status status = _externalState->getStoredAuthorizationVersion(&authzVersion);
+            if (!status.isOK())
                 return status;
-            }
-        } else {
-            return Status(ErrorCodes::UnsupportedFormat,
-                          mongoutils::str::stream() <<
-                                  "Unrecognized authorization format version: " << _version);
         }
 
+        switch (authzVersion) {
+        default:
+            return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                          "Illegal value for authorization data schema version, " << authzVersion);
+        case 2: {
+            Status status = _fetchUserV2(userName, &user);
+            if (!status.isOK())
+                return status;
+            break;
+        }
+        case 1: {
+            Status status = _fetchUserV1(userName, &user);
+            if (!status.isOK())
+                return status;
+            break;
+        }
+        }
+        guard.endFetchPhase();
 
-        Status status = _initializeUserFromPrivilegeDocument(user, userObj);
+        user->incrementRefCount();
+
+        // NOTE: It is not safe to throw an exception from here to the end of the method.
+        if (guard.isSameCacheGeneration()) {
+            _userCache.insert(make_pair(userName, user.get()));
+            if (_version == 0)
+                _version = authzVersion;
+        }
+        else {
+            // If the cache generation changed while this thread was in fetch mode, the data
+            // associated with the user may now be invalid, so we must mark it as such.  The caller
+            // may still opt to use the information for a short while, but not indefinitely.
+            user->invalidate();
+        }
+        *acquiredUser = user.release();
+
+        return Status::OK();
+    }
+
+    Status AuthorizationManager::_fetchUserV2(const UserName& userName,
+                                              std::auto_ptr<User>* acquiredUser) {
+        BSONObj userObj;
+        Status status = getUserDescription(userName, &userObj);
         if (!status.isOK()) {
             return status;
         }
 
+        // Put the new user into an auto_ptr temporarily in case there's an error while
+        // initializing the user.
+        std::auto_ptr<User> user(new User(userName));
+
+        status = _initializeUserFromPrivilegeDocument(user.get(), userObj);
+        if (!status.isOK()) {
+            return status;
+        }
+        acquiredUser->reset(user.release());
+        return Status::OK();
+    }
+
+    Status AuthorizationManager::_fetchUserV1(const UserName& userName,
+                                              std::auto_ptr<User>* acquiredUser) {
+
+        BSONObj privDoc;
+        V1UserDocumentParser parser;
+        const bool isExternalUser = (userName.getDB() == "$external");
+        const bool isAdminUser = (userName.getDB() == "admin");
+
+        std::auto_ptr<User> user(new User(userName));
+        user->setSchemaVersion1();
+        user->markProbedV1("$external");
+        if (isExternalUser) {
+            User::CredentialData creds;
+            creds.isExternal = true;
+            user->setCredentials(creds);
+        }
+        else {
+            // Users from databases other than "$external" must have an associated privilege
+            // document in their database.
+            Status status = _externalState->getPrivilegeDocumentV1(
+                    userName.getDB(), userName, &privDoc);
+            if (!status.isOK())
+                return status;
+
+            status = parser.initializeUserRolesFromUserDocument(
+                    user.get(), privDoc, userName.getDB());
+            if (!status.isOK())
+                return status;
+
+            status = parser.initializeUserCredentialsFromUserDocument(user.get(), privDoc);
+            if (!status.isOK())
+                return status;
+            user->markProbedV1(userName.getDB());
+        }
+        if (!isAdminUser) {
+            // Users from databases other than "admin" probe the "admin" database at login, to
+            // ensure that the acquire any privileges derived from "otherDBRoles" fields in
+            // admin.system.users.
+            Status status = _externalState->getPrivilegeDocumentV1("admin", userName, &privDoc);
+            if (status.isOK()) {
+                status = parser.initializeUserRolesFromUserDocument(user.get(), privDoc, "admin");
+                if (!status.isOK())
+                    return status;
+            }
+            user->markProbedV1("admin");
+        }
+
+        _initializeUserPrivilegesFromRolesV1(user.get());
+        acquiredUser->reset(user.release());
+        return Status::OK();
+    }
+
+    Status AuthorizationManager::acquireV1UserProbedForDb(
+            const UserName& userName, const StringData& dbname, User** acquiredUser) {
+
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        unordered_map<UserName, User*>::iterator it;
+        while ((_userCache.end() == (it = _userCache.find(userName))) &&
+               guard.otherUpdateInFetchPhase()) {
+
+            guard.wait();
+        }
+
+        User* user = NULL;
+        if (_userCache.end() != it) {
+            user = it->second;
+            fassert(0, user->getSchemaVersion() == 1);
+            fassert(0, user->isValid());
+            if (user->hasProbedV1(dbname)) {
+                user->incrementRefCount();
+                *acquiredUser = user;
+                return Status::OK();
+            }
+        }
+
+        while (guard.otherUpdateInFetchPhase())
+            guard.wait();
+
+        guard.beginFetchPhase();
+
+        std::auto_ptr<User> auser;
+        if (!user) {
+            Status status = _fetchUserV1(userName, &auser);
+            if (!status.isOK())
+                return status;
+            user = auser.get();
+        }
+
+        BSONObj privDoc;
+        Status status = _externalState->getPrivilegeDocumentV1(dbname, userName, &privDoc);
+        if (status.isOK()) {
+            V1UserDocumentParser parser;
+            status = parser.initializeUserRolesFromUserDocument(user, privDoc, dbname);
+            if (!status.isOK())
+                return status;
+            _initializeUserPrivilegesFromRolesV1(user);
+            user->markProbedV1(dbname);
+        }
+        else if (status != ErrorCodes::UserNotFound) {
+            return status;
+        }
+
         user->incrementRefCount();
-        _userCache.insert(make_pair(userName, userHolder.release()));
+        // NOTE: It is not safe to throw an exception from here to the end of the method.
         *acquiredUser = user;
+        auser.release();
+        if (guard.isSameCacheGeneration()) {
+            _userCache.insert(make_pair(userName, user));
+        }
+        else {
+            // If the cache generation changed while this thread was in fetch mode, the data
+            // associated with the user may now be invalid, so we must mark it as such.  The caller
+            // may still opt to use the information for a short while, but not indefinitely.
+            user->invalidate();
+        }
         return Status::OK();
     }
 
@@ -728,46 +988,27 @@ namespace {
         }
     }
 
-    /**
-     * Parses privDoc and initializes the user's "credentials" field with the credential
-     * information extracted from the privilege document.
-     */
-    Status _initializeUserCredentialsFromPrivilegeDocument(User* user, const BSONObj& privDoc) {
-        User::CredentialData credentials;
-        if (privDoc.hasField("pwd")) {
-            credentials.password = privDoc["pwd"].String();
-            credentials.isExternal = false;
-        }
-        else if (privDoc.hasField("userSource")) {
-            std::string userSource = privDoc["userSource"].String();
-            if (userSource != "$external") {
-                return Status(ErrorCodes::FailedToParse,
-                              "Cannot extract credentials from user documents without a password "
-                              "and with userSource != \"$external\"");
-            } else {
-                credentials.isExternal = true;
-            }
-        } else {
-            return Status(ErrorCodes::FailedToParse,
-                          "Invalid user document: must have one of \"pwd\" and \"userSource\"");
+    void AuthorizationManager::invalidateUserByName(const UserName& userName) {
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        ++_cacheGeneration;
+        unordered_map<UserName, User*>::iterator it = _userCache.find(userName);
+        if (it == _userCache.end()) {
+            return;
         }
 
         user->setCredentials(credentials);
         return Status::OK();
     }
 
-    void _initializeUserRolesFromV0PrivilegeDocument(
-            User* user, const BSONObj& privDoc, const StringData& dbname) {
-        bool readOnly = privDoc["readOnly"].trueValue();
-        if (dbname == "admin") {
-            if (readOnly) {
-                user->addRole(RoleName(SYSTEM_ROLE_V0_ADMIN_READ, "admin"));
-            } else {
-                user->addRole(RoleName(SYSTEM_ROLE_V0_ADMIN_READ_WRITE, "admin"));
-            }
-        } else {
-            if (readOnly) {
-                user->addRole(RoleName(SYSTEM_ROLE_V0_READ, dbname));
+    void AuthorizationManager::invalidateUsersFromDB(const std::string& dbname) {
+        CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+        ++_cacheGeneration;
+        unordered_map<UserName, User*>::iterator it = _userCache.begin();
+        while (it != _userCache.end()) {
+            User* user = it->second;
+            if (user->getName().getDB() == dbname) {
+                _userCache.erase(it++);
+                user->invalidate();
             } else {
                 user->addRole(RoleName(SYSTEM_ROLE_V0_READ_WRITE, dbname));
             }
@@ -797,152 +1038,33 @@ namespace {
         return status;
     }
 
-    /**
-     * Upserts a schemaVersion26Upgrade user document in the usersAltCollectionNamespace
-     * according to the schemaVersion24 user document "oldUserDoc" from database "sourceDB".
-     *
-     * Throws a DBException on errors.
-     */
-    void upgradeProcessUser(AuthzManagerExternalState* externalState,
-                            const StringData& sourceDB,
-                            const BSONObj& oldUserDoc,
-                            const BSONObj& writeConcern) {
-
-        uassert(17387,
-                mongoutils::str::stream() << "While preparing to upgrade user doc from the 2.4 "
-                        "user data schema to the 2.6 schema, found a user doc with a "
-                        "\"credentials\" field, indicating that the doc already has the new "
-                        "schema. Make sure that all documents in admin.system.users have the same "
-                        "user data schema and that the version document in admin.system.version "
-                        "indicates the correct schema version.  User doc found: " <<
-                        oldUserDoc.toString(),
-                !oldUserDoc.hasField("credentials"));
-
-        uassert(17386,
-                mongoutils::str::stream() << "While preparing to upgrade user doc from "
-                        "the 2.4 user data schema to the 2.6 schema, found a user doc "
-                        "that doesn't conform to the 2.4 *or* 2.6 schema.  Doc found: "
-                        << oldUserDoc.toString(),
-                oldUserDoc.hasField("user") &&
-                        (oldUserDoc.hasField("userSource") || oldUserDoc.hasField("pwd")));
-
-        std::string oldUserSource;
-        uassertStatusOK(bsonExtractStringFieldWithDefault(
-                                oldUserDoc,
-                                "userSource",
-                                sourceDB,
-                                &oldUserSource));
-
-        if (oldUserSource == "local")
-            return;  // Skips users from "local" database, which cannot be upgraded.
-
-        const std::string oldUserName = oldUserDoc["user"].String();
-        BSONObj query = BSON("_id" << oldUserSource + "." + oldUserName);
-
-        BSONObjBuilder updateBuilder;
-        {
-            BSONObjBuilder toSetBuilder(updateBuilder.subobjStart("$set"));
-            toSetBuilder << "user" << oldUserName << "db" << oldUserSource;
-            BSONElement pwdElement = oldUserDoc["pwd"];
-            if (!pwdElement.eoo()) {
-                toSetBuilder << "credentials" << BSON("MONGODB-CR" << pwdElement.String());
+    void AuthorizationManager::_invalidateUserCache_inlock() {
+        ++_cacheGeneration;
+        for (unordered_map<UserName, User*>::iterator it = _userCache.begin();
+                it != _userCache.end(); ++it) {
+            if (it->second->getName() == internalSecurity.user->getName()) {
+                // Don't invalidate the internal user
+                continue;
             }
-            else if (oldUserSource == "$external") {
-                toSetBuilder << "credentials" << BSON("external" << true);
-            }
+            it->second->invalidate();
         }
-        {
-            BSONObjBuilder pushAllBuilder(updateBuilder.subobjStart("$pushAll"));
-            BSONArrayBuilder rolesBuilder(pushAllBuilder.subarrayStart("roles"));
+        _userCache.clear();
+        // Make sure the internal user stays in the cache.
+        _userCache.insert(make_pair(internalSecurity.user->getName(), internalSecurity.user));
 
-            const bool readOnly = oldUserDoc["readOnly"].trueValue();
-            const BSONElement rolesElement = oldUserDoc["roles"];
-            if (readOnly) {
-                // Handles the cases where there is a truthy readOnly field, which is a 2.2-style
-                // read-only user.
-                if (sourceDB == "admin") {
-                    rolesBuilder << BSON("role" << "readAnyDatabase" << "db" << "admin");
-                }
-                else {
-                    rolesBuilder << BSON("role" << "read" << "db" << sourceDB);
-                }
-            }
-            else if (rolesElement.eoo()) {
-                // Handles the cases where the readOnly field is absent or falsey, but the
-                // user is known to be 2.2-style because it lacks a roles array.
-                if (sourceDB == "admin") {
-                    rolesBuilder << BSON("role" << "root" << "db" << "admin");
-                }
-                else {
-                    rolesBuilder << BSON("role" << "dbOwner" << "db" << sourceDB);
-                }
-            }
-            else {
-                // Handles 2.4-style user documents, with roles arrays and (optionally, in admin db)
-                // otherDBRoles objects.
-                uassert(17252,
-                        "roles field in v2.4 user documents must be an array",
-                        rolesElement.type() == Array);
-                for (BSONObjIterator oldRoles(rolesElement.Obj());
-                     oldRoles.more();
-                     oldRoles.next()) {
-
-                    BSONElement roleElement = *oldRoles;
-                    rolesBuilder << BSON("role" << roleElement.String() << "db" << sourceDB);
-                }
-
-                BSONElement otherDBRolesElement = oldUserDoc["otherDBRoles"];
-                if (sourceDB == "admin" && !otherDBRolesElement.eoo()) {
-                    uassert(17253,
-                            "otherDBRoles field in v2.4 user documents must be an object.",
-                            otherDBRolesElement.type() == Object);
-
-                    for (BSONObjIterator otherDBs(otherDBRolesElement.Obj());
-                         otherDBs.more();
-                         otherDBs.next()) {
-
-                        BSONElement otherDBRoles = *otherDBs;
-                        if (otherDBRoles.fieldNameStringData() == "local")
-                            continue;
-                        uassert(17254,
-                                "Member fields of otherDBRoles objects must be arrays.",
-                                otherDBRoles.type() == Array);
-                        for (BSONObjIterator oldRoles(otherDBRoles.Obj());
-                             oldRoles.more();
-                             oldRoles.next()) {
-
-                            BSONElement roleElement = *oldRoles;
-                            rolesBuilder << BSON("role" << roleElement.String() <<
-                                                 "db" << otherDBRoles.fieldNameStringData());
-                        }
-                    }
-                }
-            }
-        }
-        BSONObj update = updateBuilder.obj();
-
-        uassertStatusOK(externalState->updateOne(
-                                AuthorizationManager::usersAltCollectionNamespace,
-                                query,
-                                update,
-                                true,
-                                writeConcern));
+        // If the authorization manager was running with version-1 schema data, check to
+        // see if the version has updated next time we go to add data to the cache.
+        if (1 == _version)
+            _version = 0;
     }
 
-    /**
-     * For every schemaVersion24 user document in the system.users collection of "db",
-     * upserts the appropriate schemaVersion26Upgrade user document in usersAltCollectionNamespace.
-     */
-    Status upgradeUsersFromDB(AuthzManagerExternalState* externalState,
-                             const StringData& db,
-                             const BSONObj& writeConcern) {
-        log() << "Auth schema upgrade processing schema version " <<
-            AuthorizationManager::schemaVersion24 << " users from database " << db;
-        return externalState->query(
-                NamespaceString(db, "system.users"),
-                BSONObj(),
-                BSONObj(),
-                boost::bind(upgradeProcessUser, externalState, db, _1, writeConcern));
+    Status AuthorizationManager::initialize() {
+        invalidateUserCache();
+        Status status = _externalState->initialize();
+        if (!status.isOK())
+            return status;
+
+        return Status::OK();
     }
 
     /**
@@ -1296,6 +1418,75 @@ namespace {
             return status;
         _version = 2;
         return status;
+    }
+
+    static bool isAuthzNamespace(const StringData& ns) {
+        return (ns == AuthorizationManager::rolesCollectionNamespace.ns() ||
+                ns == AuthorizationManager::usersCollectionNamespace.ns() ||
+                ns == AuthorizationManager::versionCollectionNamespace.ns());
+    }
+
+    static bool isAuthzCollection(const StringData& coll) {
+        return (coll == AuthorizationManager::rolesCollectionNamespace.coll() ||
+                coll == AuthorizationManager::usersCollectionNamespace.coll() ||
+                coll == AuthorizationManager::versionCollectionNamespace.coll());
+    }
+
+    static bool loggedCommandOperatesOnAuthzData(const char* ns, const BSONObj& cmdObj) {
+        if (ns != AuthorizationManager::adminCommandNamespace.ns())
+            return false;
+        const StringData cmdName(cmdObj.firstElement().fieldNameStringData());
+        if (cmdName == "drop") {
+            return isAuthzCollection(StringData(cmdObj.firstElement().valuestr(),
+                                                cmdObj.firstElement().valuestrsize() - 1));
+        }
+        else if (cmdName == "dropDatabase") {
+            return true;
+        }
+        else if (cmdName == "renameCollection") {
+            return isAuthzCollection(cmdObj.firstElement().str()) ||
+                isAuthzCollection(cmdObj["to"].str());
+        }
+        else if (cmdName == "dropIndexes") {
+            return false;
+        }
+        else {
+            return true;
+        }
+    }
+
+    static bool appliesToAuthzData(
+            const char* op,
+            const char* ns,
+            const BSONObj& o) {
+
+        switch (*op) {
+        case 'i':
+        case 'u':
+        case 'd':
+            return isAuthzNamespace(ns);
+        case 'c':
+            return loggedCommandOperatesOnAuthzData(ns, o);
+            break;
+        case 'n':
+            return false;
+        default:
+            return true;
+        }
+    }
+
+    void AuthorizationManager::logOp(
+            const char* op,
+            const char* ns,
+            const BSONObj& o,
+            BSONObj* o2,
+            bool* b) {
+
+        _externalState->logOp(op, ns, o, o2, b);
+        if (appliesToAuthzData(op, ns, o)) {
+            CacheGuard guard(this, CacheGuard::fetchSynchronizationManual);
+            _invalidateUserCache_inlock();
+        }
     }
 
 } // namespace mongo

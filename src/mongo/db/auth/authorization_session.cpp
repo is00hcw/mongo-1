@@ -286,28 +286,108 @@ namespace {
                 return status;
         }
 
-        return Status::OK();
+        ActionSet actions;
+        for (int i = 0; i < resourceSearchListLength; ++i) {
+            actions.addAllActionsFromSet(user->getActionsForResource(resourceSearchList[i]));
+        }
+        return actions.contains(ActionType::changeOwnCustomData);
     }
 
-    Status AuthorizationSession::_probeForPrivilege(const Privilege& privilege) {
-        Privilege modifiedPrivilege = _modifyPrivilegeForSpecialCases(privilege);
-        if (_acquiredPrivileges.hasPrivilege(modifiedPrivilege))
-            return Status::OK();
+    bool AuthorizationSession::isAuthenticatedAsUserWithRole(const RoleName& roleName) {
+        for (UserSet::iterator it = _authenticatedUsers.begin();
+                it != _authenticatedUsers.end(); ++it) {
+            if ((*it)->hasRole(roleName)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
-        std::string dbname = nsToDatabase(modifiedPrivilege.getResource());
-        for (PrincipalSet::iterator iter = _authenticatedPrincipals.begin(),
-                 end = _authenticatedPrincipals.end();
-             iter != end; ++iter) {
+    void AuthorizationSession::_refreshUserInfoAsNeeded() {
+        AuthorizationManager& authMan = getAuthorizationManager();
+        UserSet::iterator it = _authenticatedUsers.begin();
+        while (it != _authenticatedUsers.end()) {
+            User* user = *it;
 
-            Principal* principal = *iter;
-            if (!principal->isImplicitPrivilegeAcquisitionEnabled())
-                continue;
-            if (principal->isDatabaseProbed(dbname))
-                continue;
-            _acquirePrivilegesForPrincipalFromDatabase(dbname, principal->getName());
-            principal->markDatabaseAsProbed(dbname);
-            if (_acquiredPrivileges.hasPrivilege(modifiedPrivilege))
-                return Status::OK();
+            if (!user->isValid()) {
+                // Make a good faith effort to acquire an up-to-date user object, since the one
+                // we've cached is marked "out-of-date."
+                UserName name = user->getName();
+                User* updatedUser;
+
+                Status status = authMan.acquireUser(name, &updatedUser);
+                switch (status.code()) {
+                case ErrorCodes::OK: {
+                    // Success! Replace the old User object with the updated one.
+                    fassert(17067, _authenticatedUsers.replaceAt(it, updatedUser) == user);
+                    authMan.releaseUser(user);
+                    LOG(1) << "Updated session cache of user information for " << name;
+                    break;
+                }
+                case ErrorCodes::UserNotFound: {
+                    // User does not exist anymore; remove it from _authenticatedUsers.
+                    fassert(17068, _authenticatedUsers.removeAt(it) == user);
+                    authMan.releaseUser(user);
+                    log() << "Removed deleted user " << name <<
+                        " from session cache of user information.";
+                    continue;  // No need to advance "it" in this case.
+                }
+                default:
+                    // Unrecognized error; assume that it's transient, and continue working with the
+                    // out-of-date privilege data.
+                    warning() << "Could not fetch updated user privilege information for " <<
+                        name << "; continuing to use old information.  Reason is " << status;
+                    break;
+                }
+            }
+            ++it;
+        }
+    }
+
+    bool AuthorizationSession::_isAuthorizedForPrivilege(const Privilege& privilege) {
+        const ResourcePattern& target(privilege.getResourcePattern());
+
+        ResourcePattern resourceSearchList[resourceSearchListCapacity];
+        const int resourceSearchListLength = buildResourceSearchList(target, resourceSearchList);
+
+        ActionSet unmetRequirements = privilege.getActions();
+
+        for (UserSet::iterator it = _authenticatedUsers.begin();
+                it != _authenticatedUsers.end(); ++it) {
+            User* user = *it;
+
+            if (user->getSchemaVersion() == 1 &&
+                (target.isDatabasePattern() || target.isExactNamespacePattern()) &&
+                !user->hasProbedV1(target.databaseToMatch())) {
+
+                UserName name = user->getName();
+                User* updatedUser;
+                Status status = getAuthorizationManager().acquireV1UserProbedForDb(
+                        name,
+                        target.databaseToMatch(),
+                        &updatedUser);
+                if (status.isOK()) {
+                    if (user != updatedUser) {
+                        LOG(1) << "Updated session cache for V1 user " << name;
+                        fassert(0, _authenticatedUsers.replaceAt(it, updatedUser) == user);
+                    }
+                    getAuthorizationManager().releaseUser(user);
+                    user = updatedUser;
+                }
+                else {
+                    warning() << "Could not fetch updated user privilege information for V1-style "
+                        "user " << name << "; continuing to use old information.  Reason is "
+                              << status;
+                }
+            }
+
+            for (int i = 0; i < resourceSearchListLength; ++i) {
+                ActionSet userActions = user->getActionsForResource(resourceSearchList[i]);
+                unmetRequirements.removeAllActionsFromSet(userActions);
+
+                if (unmetRequirements.empty())
+                    return true;
+            }
         }
         return Status(ErrorCodes::Unauthorized, "unauthorized", 0);
     }

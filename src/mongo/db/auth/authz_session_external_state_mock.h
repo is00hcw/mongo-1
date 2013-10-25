@@ -41,12 +41,6 @@ namespace mongo {
             _returnValue = returnValue;
         }
 
-        virtual bool _findUser(const std::string& usersNamespace,
-                               const BSONObj& query,
-                               BSONObj* result) const {
-            return false;
-        }
-
         virtual void startRequest() {}
 
         virtual void onAddAuthorizedPrincipal(Principal*) {}

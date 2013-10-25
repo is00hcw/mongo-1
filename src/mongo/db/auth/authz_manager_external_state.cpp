@@ -28,32 +28,37 @@ namespace mongo {
     AuthzManagerExternalState::AuthzManagerExternalState() {}
     AuthzManagerExternalState::~AuthzManagerExternalState() {}
 
-    Status AuthzManagerExternalState::getPrivilegeDocument(const UserName& userName,
-                                                           int authzVersion,
-                                                           BSONObj* result) {
+    Status AuthzManagerExternalState::getPrivilegeDocumentV1(const StringData& dbname,
+                                                             const UserName& userName,
+                                                             BSONObj* result) {
         if (userName == internalSecurity.user->getName()) {
             return Status(ErrorCodes::InternalError,
                           "Requested privilege document for the internal user");
         }
 
-        StringData dbname = userName.getDB();
-
-        if (dbname == StringData("$external", StringData::LiteralTag()) ||
-            dbname == AuthorizationManager::SERVER_RESOURCE_NAME ||
-            dbname == AuthorizationManager::CLUSTER_RESOURCE_NAME) {
-            return Status(ErrorCodes::UserNotFound,
-                          mongoutils::str::stream() << "No privilege documents stored in the " <<
-                          dbname << " user source.");
-        }
-
         if (!NamespaceString::validDBName(dbname)) {
-            return Status(ErrorCodes::BadValue, "Bad database name \"" + dbname + "\"");
+            return Status(ErrorCodes::BadValue,
+                          mongoutils::str::stream() << "Bad database name \"" << dbname << "\"");
         }
 
-        if (dbname == StringData("local", StringData::LiteralTag()) &&
-            userName.getUser() == internalSecurity.user) {
+        // Build the query needed to get the privilege document
+        std::string usersNamespace;
+        BSONObjBuilder queryBuilder;
+        usersNamespace = mongoutils::str::stream() << dbname << ".system.users";
+        queryBuilder.append(AuthorizationManager::V1_USER_NAME_FIELD_NAME, userName.getUser());
+        if (dbname == userName.getDB()) {
+            queryBuilder.appendNull(AuthorizationManager::V1_USER_SOURCE_FIELD_NAME);
+        }
+        else {
+            queryBuilder.append(AuthorizationManager::V1_USER_SOURCE_FIELD_NAME, userName.getDB());
+        }
 
-            if (internalSecurity.pwd.empty()) {
+        // Query for the privilege document
+        BSONObj userBSONObj;
+        Status found = _findUser(usersNamespace, queryBuilder.done(), &userBSONObj);
+        if (!found.isOK()) {
+            if (found.code() == ErrorCodes::UserNotFound) {
+                // Return more detailed status that includes user name.
                 return Status(ErrorCodes::UserNotFound,
                               "key file must be used to log in with internal user",
                               15889);

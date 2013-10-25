@@ -38,15 +38,52 @@ namespace mongo {
 
         virtual ~AuthzManagerExternalState();
 
-        // Gets the privilege information document for "userName".  authzVersion indicates what
-        // version of the privilege document format is being used, which is needed to know how to
-        // query for the user's privilege document.
-        //
-        // On success, returns Status::OK() and stores a shared-ownership copy of the document into
-        // "result".
-        Status getPrivilegeDocument(const UserName& userName,
-                                    int authzVersion,
-                                    BSONObj* result);
+        /**
+         * Initializes the external state object.  Must be called after construction and before
+         * calling other methods.  Object may not be used after this method returns something other
+         * than Status::OK().
+         */
+        virtual Status initialize() = 0;
+
+        /**
+         * Retrieves the schema version of the persistent data describing users and roles.
+         */
+        virtual Status getStoredAuthorizationVersion(int* outVersion) = 0;
+
+        /**
+         * Writes into "result" a document describing the named user and returns Status::OK().  The
+         * description includes the user credentials, if present, the user's role membership and
+         * delegation information, a full list of the user's privileges, and a full list of the
+         * user's roles, including those roles held implicitly through other roles (indirect roles).
+         * In the event that some of this information is inconsistent, the document will contain a
+         * "warnings" array, with string messages describing inconsistencies.
+         *
+         * If the user does not exist, returns ErrorCodes::UserNotFound.
+         */
+        virtual Status getUserDescription(const UserName& userName, BSONObj* result) = 0;
+
+        /**
+         * Writes into "result" a document describing the named role and returns Status::OK().  The
+         * description includes the role's in which the named role has membership, a full list of
+         * the role's privileges, and a full list of the roles of which the named role is a member,
+         * including those roles memberships held implicitly through other roles (indirect roles).
+         * In the event that some of this information is inconsistent, the document will contain a
+         * "warnings" array, with string messages describing inconsistencies.
+         *
+         * If the role does not exist, returns ErrorCodes::RoleNotFound.
+         */
+        virtual Status getRoleDescription(const RoleName& roleName, BSONObj* result) = 0;
+
+        /**
+         * Gets the privilege document for "userName" stored in the system.users collection of
+         * database "dbname".  Useful only for schemaVersion24 user documents.  For newer schema
+         * versions, use getUserDescription().
+         *
+         * On success, returns Status::OK() and stores a shared-ownership copy of the document into
+         * "result".
+         */
+        Status getPrivilegeDocumentV1(
+                const StringData& dbname, const UserName& userName, BSONObj* result);
 
         // Returns true if there exists at least one privilege document in the system.
         bool hasAnyPrivilegeDocuments();
