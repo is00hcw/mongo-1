@@ -88,19 +88,28 @@ namespace mongo {
         }
     }
 
-    Status AuthzManagerExternalStateMongos::updatePrivilegeDocument(
-            const UserName& user, const BSONObj& updateObj) {
+    Status AuthzManagerExternalStateMongos::getRoleDescription(const RoleName& roleName,
+                                                               bool showPrivileges,
+                                                               BSONObj* result) {
         try {
-            string userNS = mongoutils::str::stream() << user.getDB() << ".system.users";
-            scoped_ptr<ScopedDbConnection> conn(getConnectionForUsersCollection(userNS));
-
-            conn->get()->update(userNS,
-                                QUERY("user" << user.getUser() << "userSource" << BSONNULL),
-                                updateObj);
-
-            // 30 second timeout for w:majority
-            BSONObj res = conn->get()->getLastErrorDetailed(false, false, -1, 30*1000);
-            string err = conn->get()->getLastErrorString(res);
+            scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(
+                    AuthorizationManager::rolesCollectionNamespace));
+            BSONObj cmdResult;
+            conn->get()->runCommand(
+                    "admin",
+                    BSON("rolesInfo" <<
+                         BSON_ARRAY(BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME <<
+                                         roleName.getRole() <<
+                                         AuthorizationManager::ROLE_SOURCE_FIELD_NAME <<
+                                         roleName.getDB())) <<
+                         "showPrivileges" << showPrivileges),
+                    cmdResult);
+            if (!cmdResult["ok"].trueValue()) {
+                int code = cmdResult["code"].numberInt();
+                if (code == 0) code = ErrorCodes::UnknownError;
+                return Status(ErrorCodes::Error(code), cmdResult["errmsg"].str());
+            }
+            *result = cmdResult["roles"]["0"].Obj().getOwned();
             conn->done();
 
             if (!err.empty()) {
@@ -123,8 +132,39 @@ namespace mongo {
         }
     }
 
-    Status AuthzManagerExternalStateMongos::removePrivilegeDocuments(const string& dbname,
-                                                                     const BSONObj& query) {
+    Status AuthzManagerExternalStateMongos::getRoleDescriptionsForDB(const std::string dbname,
+                                                                     bool showPrivileges,
+                                                                     bool showBuiltinRoles,
+                                                                     vector<BSONObj>* result) {
+        try {
+            scoped_ptr<ScopedDbConnection> conn(getConnectionForAuthzCollection(
+                    AuthorizationManager::rolesCollectionNamespace));
+            BSONObj cmdResult;
+            conn->get()->runCommand(
+                    dbname,
+                    BSON("rolesInfo" << 1 <<
+                         "showPrivileges" << showPrivileges <<
+                         "showBuiltinRoles" << showBuiltinRoles),
+                    cmdResult);
+            if (!cmdResult["ok"].trueValue()) {
+                int code = cmdResult["code"].numberInt();
+                if (code == 0) code = ErrorCodes::UnknownError;
+                return Status(ErrorCodes::Error(code), cmdResult["errmsg"].str());
+            }
+            for (BSONObjIterator it(cmdResult["roles"].Obj()); it.more(); it.next()) {
+                result->push_back((*it).Obj().getOwned());
+            }
+            conn->done();
+            return Status::OK();
+        } catch (const DBException& e) {
+            return e.toStatus();
+        }
+    }
+
+    Status AuthzManagerExternalStateMongos::findOne(
+            const NamespaceString& collectionName,
+            const BSONObj& query,
+            BSONObj* result) {
         try {
             string userNS = dbname + ".system.users";
             scoped_ptr<ScopedDbConnection> conn(getConnectionForUsersCollection(userNS));

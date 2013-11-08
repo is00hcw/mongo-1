@@ -700,34 +700,20 @@ namespace {
         }
     }
 
-    /**
-     * Given a database name and a BSONElement representing an array of roles, populates
-     * "outPrivileges" with the privileges associated with the given roles on the named database.
-     *
-     * Returns Status::OK() on success.
-     */
-    Status _getPrivilegesFromRoles(const std::string& dbname,
-                                   const BSONElement& rolesElement,
-                                   std::vector<Privilege>* outPrivileges) {
+    Status AuthorizationManager::getRoleDescription(const RoleName& roleName,
+                                                    bool showPrivileges,
+                                                    BSONObj* result) {
+        return _externalState->getRoleDescription(roleName, showPrivileges, result);
+    }
 
-        static const char privilegesTypeMismatchMessage[] =
-            "Roles must be enumerated in an array of strings.";
-
-        if (dbname == PrivilegeSet::WILDCARD_RESOURCE) {
-            return Status(ErrorCodes::BadValue,
-                          PrivilegeSet::WILDCARD_RESOURCE + " is an invalid database name.");
-        }
-
-        if (rolesElement.type() != Array)
-            return Status(ErrorCodes::TypeMismatch, privilegesTypeMismatchMessage);
-
-        for (BSONObjIterator iter(rolesElement.embeddedObject()); iter.more(); iter.next()) {
-            BSONElement roleElement = *iter;
-            if (roleElement.type() != String)
-                return Status(ErrorCodes::TypeMismatch, privilegesTypeMismatchMessage);
-            _addPrivilegesForSystemRole(dbname, roleElement.str(), outPrivileges);
-        }
-        return Status::OK();
+    Status AuthorizationManager::getRoleDescriptionsForDB(const std::string dbname,
+                                                          bool showPrivileges,
+                                                          bool showBuiltinRoles,
+                                                          vector<BSONObj>* result) {
+        return _externalState->getRoleDescriptionsForDB(dbname,
+                                                        showPrivileges,
+                                                        showBuiltinRoles,
+                                                        result);
     }
 
     Status AuthorizationManager::_buildPrivilegeSetFromExtendedPrivilegeDocument(

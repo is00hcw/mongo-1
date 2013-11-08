@@ -200,9 +200,49 @@ namespace mongo {
         // that an old-style user with those attributes should be given.
         ActionSet getActionsForOldStyleUser(const std::string& dbname, bool readOnly) const;
 
-        // Returns an ActionSet of all actions that can be be granted to users.  This does not
-        // include internal-only actions.
-        ActionSet getAllUserActions() const;
+        /**
+         * Writes into "result" a document describing the named user and returns Status::OK().  The
+         * description includes the user credentials and customData, if present, the user's role
+         * membership and delegation information, a full list of the user's privileges, and a full
+         * list of the user's roles, including those roles held implicitly through other roles
+         * (indirect roles).  In the event that some of this information is inconsistent, the
+         * document will contain a "warnings" array, with string messages describing
+         * inconsistencies.
+         *
+         * If the user does not exist, returns ErrorCodes::UserNotFound.
+         */
+        Status getUserDescription(const UserName& userName, BSONObj* result);
+
+        /**
+         * Writes into "result" a document describing the named role and returns Status::OK().  The
+         * description includes the roles in which the named role has membership and a full list of
+         * the roles of which the named role is a member, including those roles memberships held
+         * implicitly through other roles (indirect roles). If "showPrivileges" is true, then the
+         * description documents will also include a full list of the role's privileges.
+         * In the event that some of this information is inconsistent, the document will contain a
+         * "warnings" array, with string messages describing inconsistencies.
+         *
+         * If the role does not exist, returns ErrorCodes::RoleNotFound.
+         */
+        Status getRoleDescription(const RoleName& roleName, bool showPrivileges, BSONObj* result);
+
+        /**
+         * Writes into "result" documents describing the roles that are defined on the given
+         * database. Each role description document includes the other roles in which the role has
+         * membership and a full list of the roles of which the named role is a member,
+         * including those roles memberships held implicitly through other roles (indirect roles).
+         * If showPrivileges is true, then the description documents will also include a full list
+         * of the role's privileges.  If showBuiltinRoles is true, then the result array will
+         * contain description documents for all the builtin roles for the given database, if it
+         * is false the result will just include user defined roles.
+         * In the event that some of the information in a given role description is inconsistent,
+         * the document will contain a "warnings" array, with string messages describing
+         * inconsistencies.
+         */
+        Status getRoleDescriptionsForDB(const std::string dbname,
+                                        bool showPrivileges,
+                                        bool showBuiltinRoles,
+                                        vector<BSONObj>* result);
 
         /**
          *  Returns the User object for the given userName in the out param "acquiredUser".

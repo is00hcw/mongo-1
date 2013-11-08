@@ -23,6 +23,7 @@
 #include "mongo/db/auth/role_graph.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/sequence_util.h"
 
 namespace mongo {
 namespace {
@@ -552,6 +553,135 @@ namespace {
         // Now add only 1 back and this time removing both should fail
         ASSERT_OK(graph.addPrivilegeToRole(roleA, privilege1));
         ASSERT_NOT_OK(graph.removePrivilegesFromRole(roleA, privileges));
+    }
+
+
+    TEST(RoleGraphTest, BuiltinRoles) {
+        RoleName userRole("userDefined", "dbA");
+        RoleName builtinRole("read", "dbA");
+
+        ActionSet actions;
+        actions.addAction(ActionType::insert);
+        Privilege privilege(dbAResource, actions);
+
+        RoleGraph graph;
+
+        ASSERT(graph.roleExists(builtinRole));
+        ASSERT_NOT_OK(graph.createRole(builtinRole));
+        ASSERT_NOT_OK(graph.deleteRole(builtinRole));
+        ASSERT(graph.roleExists(builtinRole));
+        ASSERT(!graph.roleExists(userRole));
+        ASSERT_OK(graph.createRole(userRole));
+        ASSERT(graph.roleExists(userRole));
+
+        ASSERT_NOT_OK(graph.addPrivilegeToRole(builtinRole, privilege));
+        ASSERT_NOT_OK(graph.removePrivilegeFromRole(builtinRole, privilege));
+        ASSERT_NOT_OK(graph.addRoleToRole(builtinRole, userRole));
+        ASSERT_NOT_OK(graph.removeRoleFromRole(builtinRole, userRole));
+
+        ASSERT_OK(graph.addPrivilegeToRole(userRole, privilege));
+        ASSERT_OK(graph.addRoleToRole(userRole, builtinRole));
+        ASSERT_OK(graph.recomputePrivilegeData());
+
+        PrivilegeVector privileges = graph.getDirectPrivileges(userRole);
+        ASSERT_EQUALS(1U, privileges.size());
+        ASSERT(privileges[0].getActions().equals(actions));
+        ASSERT(!privileges[0].getActions().contains(ActionType::find));
+        ASSERT_EQUALS(dbAResource, privileges[0].getResourcePattern());
+
+        privileges = graph.getAllPrivileges(userRole);
+        size_t i;
+        for (i = 0; i < privileges.size(); ++i) {
+            if (dbAResource == privileges[i].getResourcePattern())
+                break;
+        }
+        ASSERT_NOT_EQUALS(privileges.size(), i);
+        ASSERT(privileges[i].getActions().isSupersetOf(actions));
+        ASSERT(privileges[i].getActions().contains(ActionType::insert));
+        ASSERT(privileges[i].getActions().contains(ActionType::find));
+
+        ASSERT_OK(graph.deleteRole(userRole));
+        ASSERT(!graph.roleExists(userRole));
+    }
+
+    TEST(RoleGraphTest, BuiltinRolesOnlyOnAppropriateDatabases) {
+        RoleGraph graph;
+        ASSERT(graph.roleExists(RoleName("read", "test")));
+        ASSERT(graph.roleExists(RoleName("readWrite", "test")));
+        ASSERT(graph.roleExists(RoleName("userAdmin", "test")));
+        ASSERT(graph.roleExists(RoleName("dbAdmin", "test")));
+        ASSERT(graph.roleExists(RoleName("dbOwner", "test")));
+        ASSERT(!graph.roleExists(RoleName("readAnyDatabase", "test")));
+        ASSERT(!graph.roleExists(RoleName("readWriteAnyDatabase", "test")));
+        ASSERT(!graph.roleExists(RoleName("userAdminAnyDatabase", "test")));
+        ASSERT(!graph.roleExists(RoleName("dbAdminAnyDatabase", "test")));
+        ASSERT(!graph.roleExists(RoleName("clusterAdmin", "test")));
+        ASSERT(!graph.roleExists(RoleName("root", "test")));
+        ASSERT(!graph.roleExists(RoleName("__system", "test")));
+        ASSERT(!graph.roleExists(RoleName("MyRole", "test")));
+
+        ASSERT(graph.roleExists(RoleName("read", "admin")));
+        ASSERT(graph.roleExists(RoleName("readWrite", "admin")));
+        ASSERT(graph.roleExists(RoleName("userAdmin", "admin")));
+        ASSERT(graph.roleExists(RoleName("dbAdmin", "admin")));
+        ASSERT(graph.roleExists(RoleName("dbOwner", "admin")));
+        ASSERT(graph.roleExists(RoleName("readAnyDatabase", "admin")));
+        ASSERT(graph.roleExists(RoleName("readWriteAnyDatabase", "admin")));
+        ASSERT(graph.roleExists(RoleName("userAdminAnyDatabase", "admin")));
+        ASSERT(graph.roleExists(RoleName("dbAdminAnyDatabase", "admin")));
+        ASSERT(graph.roleExists(RoleName("clusterAdmin", "admin")));
+        ASSERT(graph.roleExists(RoleName("root", "admin")));
+        ASSERT(graph.roleExists(RoleName("__system", "admin")));
+        ASSERT(!graph.roleExists(RoleName("MyRole", "admin")));
+    }
+
+    TEST(RoleGraphTest, getRolesForDatabase) {
+        RoleGraph graph;
+        graph.createRole(RoleName("myRole", "test"));
+        // Make sure that a role on "test2" doesn't show up in the roles list for "test"
+        graph.createRole(RoleName("anotherRole", "test2"));
+        graph.createRole(RoleName("myAdminRole", "admin"));
+
+        // Non-admin DB with no user-defined roles
+        RoleNameIterator it = graph.getRolesForDatabase("fakedb");
+        ASSERT_EQUALS(RoleName("dbAdmin", "fakedb"), it.next());
+        ASSERT_EQUALS(RoleName("dbOwner", "fakedb"), it.next());
+        ASSERT_EQUALS(RoleName("read", "fakedb"), it.next());
+        ASSERT_EQUALS(RoleName("readWrite", "fakedb"), it.next());
+        ASSERT_EQUALS(RoleName("userAdmin", "fakedb"), it.next());
+        ASSERT_FALSE(it.more());
+
+        // Non-admin DB with a user-defined role
+        it = graph.getRolesForDatabase("test");
+        ASSERT_EQUALS(RoleName("dbAdmin", "test"), it.next());
+        ASSERT_EQUALS(RoleName("dbOwner", "test"), it.next());
+        ASSERT_EQUALS(RoleName("myRole", "test"), it.next());
+        ASSERT_EQUALS(RoleName("read", "test"), it.next());
+        ASSERT_EQUALS(RoleName("readWrite", "test"), it.next());
+        ASSERT_EQUALS(RoleName("userAdmin", "test"), it.next());
+        ASSERT_FALSE(it.more());
+
+        // Admin DB
+        it = graph.getRolesForDatabase("admin");
+        ASSERT_EQUALS(RoleName("__system", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("backup", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("clusterAdmin", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("clusterManager", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("clusterMonitor", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("dbAdmin", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("dbAdminAnyDatabase", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("dbOwner", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("hostManager", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("myAdminRole", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("read", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("readAnyDatabase", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("readWrite", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("readWriteAnyDatabase", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("restore", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("root", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("userAdmin", "admin"), it.next());
+        ASSERT_EQUALS(RoleName("userAdminAnyDatabase", "admin"), it.next());
+        ASSERT_FALSE(it.more());
     }
 
 }  // namespace

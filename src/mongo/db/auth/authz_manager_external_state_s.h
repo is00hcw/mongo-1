@@ -35,14 +35,16 @@ namespace mongo {
         AuthzManagerExternalStateMongos();
         virtual ~AuthzManagerExternalStateMongos();
 
-        virtual Status insertPrivilegeDocument(const std::string& dbname,
-                                               const BSONObj& userObj);
-
-        virtual Status updatePrivilegeDocument(const UserName& user,
-                                               const BSONObj& updateObj);
-
-        virtual Status removePrivilegeDocuments(const std::string& dbname,
-                                                const BSONObj& query);
+        virtual Status initialize();
+        virtual Status getStoredAuthorizationVersion(int* outVersion);
+        virtual Status getUserDescription(const UserName& userName, BSONObj* result);
+        virtual Status getRoleDescription(const RoleName& roleName,
+                                          bool showPrivileges,
+                                          BSONObj* result);
+        virtual Status getRoleDescriptionsForDB(const std::string dbname,
+                                                bool showPrivileges,
+                                                bool showBuiltinRoles,
+                                                vector<BSONObj>* result);
 
         virtual Status getAllDatabaseNames(std::vector<std::string>* dbnames);
 

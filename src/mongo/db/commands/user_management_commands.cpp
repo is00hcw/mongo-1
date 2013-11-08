@@ -361,8 +361,10 @@ namespace mongo {
                 return false;
             }
 
-            if (cmdObj.hasField("extraData")) {
-                status = bsonExtractField(cmdObj, "extraData", &extraData);
+            // Role existence has to be checked after acquiring the update lock
+            for (size_t i = 0; i < args.roles.size(); ++i) {
+                BSONObj ignored;
+                status = authzManager->getRoleDescription(args.roles[i], false, &ignored);
                 if (!status.isOK()) {
                     addStatus(Status(ErrorCodes::UserModificationFailed,
                                      "Invalid \"extraData\" object"),
@@ -400,8 +402,17 @@ namespace mongo {
                 userObjBuilder.append(extraData);
             }
 
-            if (cmdObj.hasField("roles")) {
-                userObjBuilder.append(roles);
+
+            // Role existence has to be checked after acquiring the update lock
+            if (args.hasRoles) {
+                for (size_t i = 0; i < args.roles.size(); ++i) {
+                    BSONObj ignored;
+                    status = authzManager->getRoleDescription(args.roles[i], false, &ignored);
+                    if (!status.isOK()) {
+                        addStatus(status, result);
+                        return false;
+                    }
+                }
             }
 
             status = getGlobalAuthorizationManager()->insertPrivilegeDocument(dbname,
@@ -2077,6 +2088,24 @@ namespace mongo {
                     }
                     if (!status.isOK()) {
                         return appendCommandStatus(result, status);
+                    }
+                    rolesArrayBuilder.append(roleDetails);
+                }
+
+                for (size_t i = 0; i < rolesDocs.size(); ++i) {
+                    rolesArrayBuilder.append(rolesDocs[i]);
+                }
+            } else {
+                for (size_t i = 0; i < args.roleNames.size(); ++i) {
+                    BSONObj roleDetails;
+                    status = getGlobalAuthorizationManager()->getRoleDescription(
+                            args.roleNames[i], args.showPrivileges, &roleDetails);
+                    if (status.code() == ErrorCodes::RoleNotFound) {
+                        continue;
+                    }
+                    if (!status.isOK()) {
+                        addStatus(status, result);
+                        return false;
                     }
                     rolesArrayBuilder.append(roleDetails);
                 }

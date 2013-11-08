@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <set>
+#include <vector>
 
 #include "mongo/base/status.h"
 #include "mongo/db/auth/privilege.h"
@@ -57,13 +58,19 @@ namespace mongo {
         RoleNameIterator getDirectMembers(const RoleName& role) const;
 
         /**
-         * Returns an iterator that can be used to get a list of "subordinate" roles of the given
-         * role.  Subordinate roles are the roles that this role has been granted directly (roles
+         * Returns an iterator over the RoleNames of the "subordinates" of the given role.
+         * Subordinate roles are the roles that this role has been granted directly (roles
          * that have been granted transitively through another role are not included).  These are
          * the "children" of this node in the graph. The iterator is valid until the next call to
          * addRole or removeRole.
          */
         RoleNameIterator getDirectSubordinates(const RoleName& role) const;
+
+        /**
+         * Returns an iterator that can be used to get a full list of roles (in lexicographical
+         * order) that are defined on the given database.
+         */
+        RoleNameIterator getRolesForDatabase(const std::string& dbname);
 
         /**
          * Returns a vector of the privileges that the given role has been directly granted.
@@ -169,6 +176,37 @@ namespace mongo {
                                              std::vector<RoleName>& inProgressRoles,
                                              unordered_set<RoleName>& visitedRoles);
 
+        /**
+         * If the role name given is not a built-in role, or it is but it's already in the role
+         * graph, then this does nothing.  If it *is* a built-in role and this is the first time
+         * this function has been called for this role, it will add the role into the role graph.
+         */
+        void _createBuiltinRoleIfNeeded(const RoleName& role);
+
+        /**
+         * Adds the built-in roles for the given database name to the role graph if they aren't
+         * already present.
+         */
+        void _createBuiltinRolesForDBIfNeeded(const std::string& dbname);
+
+        /**
+         * Returns whether or not the given role exists strictly within the role graph.
+         */
+        bool _roleExistsDontCreateBuiltin(const RoleName& role);
+
+        /**
+         * Just creates the role in the role graph, without checking whether or not the role already
+         * exists.
+         */
+        void _createRoleDontCheckIfRoleExists(const RoleName& role);
+
+        /**
+         * Grants "privilegeToAdd" to "role".
+         * Doesn't do any checking as to whether the role exists or is a built-in role.
+         */
+        void _addPrivilegeToRoleNoChecks(const RoleName& role, const Privilege& privilegeToAdd);
+
+
         // Represents all the outgoing edges to other roles from any given role.
         typedef unordered_map<RoleName, unordered_set<RoleName> > EdgeSet;
         // Maps a role name to a list of privileges associated with that role.
@@ -178,6 +216,7 @@ namespace mongo {
         EdgeSet _roleToMembers;
         RolePrivilegeMap _directPrivilegesForRole;
         RolePrivilegeMap _allPrivilegesForRole;
+        set<RoleName> _allRoles;
     };
 
     void swap(RoleGraph& lhs, RoleGraph& rhs);
