@@ -99,10 +99,6 @@ namespace {
         }
     }
 
-    Principal* AuthorizationSession::lookupPrincipal(const UserName& name) {
-        return _authenticatedPrincipals.lookup(name);
-    }
-
     void AuthorizationSession::logoutDatabase(const std::string& dbname) {
         Principal* principal = _authenticatedPrincipals.lookupByDBName(dbname);
         if (!principal)

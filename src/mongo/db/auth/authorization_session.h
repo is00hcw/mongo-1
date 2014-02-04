@@ -60,11 +60,16 @@ namespace mongo {
 
         // Returns the authenticated principal with the given name.  Returns NULL
         // if no such user is found.
-        // Ownership of the returned Principal remains with _authenticatedPrincipals
-        Principal* lookupPrincipal(const UserName& name);
+        // The user remains in the _authenticatedUsers set for this AuthorizationSession,
+        // and ownership of the user stays with the AuthorizationManager
+        User* lookupUser(const UserName& name);
 
-        // Gets an iterator over the names of all authenticated principals stored in this manager.
-        PrincipalSet::NameIterator getAuthenticatedPrincipalNames();
+        // Gets an iterator over the names of all authenticated users stored in this manager.
+        UserNameIterator getAuthenticatedUserNames();
+
+        // Returns a string representing all logged-in users on the current session.
+        // WARNING: this string will contain NUL bytes so don't call c_str()!
+        std::string getAuthenticatedUserNamesToken();
 
         // Removes any authenticated principals whose authorization credentials came from the given
         // database, and revokes any privileges that were granted via that principal.

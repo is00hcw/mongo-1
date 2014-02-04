@@ -39,30 +39,4 @@ namespace mongo {
         _checkShouldAllowLocalhost();
     }
 
-    namespace {
-        ScopedDbConnection* getConnectionForUsersCollection(const std::string& ns) {
-            //
-            // Note: The connection mechanism here is *not* ideal, and should not be used elsewhere.
-            // If the primary for the collection moves, this approach may throw rather than handle
-            // version exceptions.
-            //
-
-            DBConfigPtr config = grid.getDBConfig(ns);
-            Shard s = config->getShard(ns);
-
-            return ScopedDbConnection::getInternalScopedDbConnection(s.getConnString(), 30.0);
-        }
-    }
-
-    bool AuthzSessionExternalStateMongos::_findUser(const string& usersNamespace,
-                                                   const BSONObj& queryDoc,
-                                                   BSONObj* result) const {
-        scoped_ptr<ScopedDbConnection> conn(getConnectionForUsersCollection(usersNamespace));
-        Query query(queryDoc);
-        query.readPref(ReadPreference_PrimaryPreferred, BSONArray());
-        *result = conn->get()->findOne(usersNamespace, query).getOwned();
-        conn->done();
-        return !result->isEmpty();
-    }
-
 } // namespace mongo
