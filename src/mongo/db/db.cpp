@@ -28,9 +28,7 @@
 #include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
-#include "mongo/db/collection.h"
-#include "mongo/db/collection_map.h"
-#include "mongo/db/auth/auth_global_external_state_d.h"
+#include "mongo/db/auth/auth_index_d.h"
 #include "mongo/db/auth/authz_manager_external_state_d.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
@@ -735,6 +733,13 @@ namespace mongo {
             LOCK_REASON(lockReason, "startup: opening admin db");
             Client::WriteContext c("admin", lockReason);
         }
+
+        authindex::configureSystemIndexes("admin");
+
+        getDeleter()->startWorkers();
+
+        // Starts a background thread that rebuilds all incomplete indices. 
+        indexRebuilder.go(); 
 
         listen(listenPort);
 
