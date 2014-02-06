@@ -763,15 +763,285 @@ namespace {
      * Parses privDoc and initializes the user's "roles" field with the role list extracted
      * from the privilege document.
      */
-    Status _initializeUserRolesFromPrivilegeDocument(
-            User* user, const BSONObj& privDoc, const StringData& dbname) {
-        if (!privDoc.hasField("roles")) {
-            _initializeUserRolesFromV0PrivilegeDocument(user, privDoc, dbname);
-        } else {
-            return _initializeUserRolesFromV1PrivilegeDocument(user, privDoc, dbname);
+    void upgradeProcessUser(AuthzManagerExternalState* externalState,
+                            const StringData& sourceDB,
+                            const BSONObj& oldUserDoc,
+                            const BSONObj& writeConcern) {
+
+        uassert(17387,
+                mongoutils::str::stream() << "While preparing to upgrade user doc from the 2.4 "
+                        "user data schema to the 2.6 schema, found a user doc with a "
+                        "\"credentials\" field, indicating that the doc already has the new "
+                        "schema. Make sure that all documents in admin.system.users have the same "
+                        "user data schema and that the version document in admin.system.version "
+                        "indicates the correct schema version.  User doc found: " <<
+                        oldUserDoc.toString(),
+                !oldUserDoc.hasField("credentials"));
+
+        uassert(17386,
+                mongoutils::str::stream() << "While preparing to upgrade user doc from "
+                        "the 2.4 user data schema to the 2.6 schema, found a user doc "
+                        "that doesn't conform to the 2.4 *or* 2.6 schema.  Doc found: "
+                        << oldUserDoc.toString(),
+                oldUserDoc.hasField("user") &&
+                        (oldUserDoc.hasField("userSource") || oldUserDoc.hasField("pwd")));
+
+        std::string oldUserSource;
+        uassertStatusOK(bsonExtractStringFieldWithDefault(
+                                oldUserDoc,
+                                "userSource",
+                                sourceDB,
+                                &oldUserSource));
+
+        if (oldUserSource == "local")
+            return;  // Skips users from "local" database, which cannot be upgraded.
+
+        const std::string oldUserName = oldUserDoc["user"].String();
+        BSONObj query = BSON("_id" << oldUserSource + "." + oldUserName);
+
+        BSONObjBuilder updateBuilder;
+        {
+            BSONObjBuilder toSetBuilder(updateBuilder.subobjStart("$set"));
+            toSetBuilder << "user" << oldUserName << "db" << oldUserSource;
+            BSONElement pwdElement = oldUserDoc["pwd"];
+            if (!pwdElement.eoo()) {
+                toSetBuilder << "credentials" << BSON("MONGODB-CR" << pwdElement.String());
+            }
+            else if (oldUserSource == "$external") {
+                toSetBuilder << "credentials" << BSON("external" << true);
+            }
         }
-        // TODO(spencer): dassert that if you have a V0 or V1 privilege document that the _version
-        // of the system is 1.
+        {
+            BSONObjBuilder pushAllBuilder(updateBuilder.subobjStart("$pushAll"));
+            BSONArrayBuilder rolesBuilder(pushAllBuilder.subarrayStart("roles"));
+
+            const bool readOnly = oldUserDoc["readOnly"].trueValue();
+            const BSONElement rolesElement = oldUserDoc["roles"];
+            if (readOnly) {
+                // Handles the cases where there is a truthy readOnly field, which is a 2.2-style
+                // read-only user.
+                if (sourceDB == "admin") {
+                    rolesBuilder << BSON("role" << "readAnyDatabase" << "db" << "admin");
+                }
+                else {
+                    rolesBuilder << BSON("role" << "read" << "db" << sourceDB);
+                }
+            }
+            else if (rolesElement.eoo()) {
+                // Handles the cases where the readOnly field is absent or falsey, but the
+                // user is known to be 2.2-style because it lacks a roles array.
+                if (sourceDB == "admin") {
+                    rolesBuilder << BSON("role" << "root" << "db" << "admin");
+                }
+                else {
+                    rolesBuilder << BSON("role" << "dbOwner" << "db" << sourceDB);
+                }
+            }
+            else {
+                // Handles 2.4-style user documents, with roles arrays and (optionally, in admin db)
+                // otherDBRoles objects.
+                uassert(17252,
+                        "roles field in v2.4 user documents must be an array",
+                        rolesElement.type() == Array);
+                for (BSONObjIterator oldRoles(rolesElement.Obj());
+                     oldRoles.more();
+                     oldRoles.next()) {
+
+                    BSONElement roleElement = *oldRoles;
+                    rolesBuilder << BSON("role" << roleElement.String() << "db" << sourceDB);
+                }
+
+                BSONElement otherDBRolesElement = oldUserDoc["otherDBRoles"];
+                if (sourceDB == "admin" && !otherDBRolesElement.eoo()) {
+                    uassert(17253,
+                            "otherDBRoles field in v2.4 user documents must be an object.",
+                            otherDBRolesElement.type() == Object);
+
+                    for (BSONObjIterator otherDBs(otherDBRolesElement.Obj());
+                         otherDBs.more();
+                         otherDBs.next()) {
+
+                        BSONElement otherDBRoles = *otherDBs;
+                        if (otherDBRoles.fieldNameStringData() == "local")
+                            continue;
+                        uassert(17254,
+                                "Member fields of otherDBRoles objects must be arrays.",
+                                otherDBRoles.type() == Array);
+                        for (BSONObjIterator oldRoles(otherDBRoles.Obj());
+                             oldRoles.more();
+                             oldRoles.next()) {
+
+                            BSONElement roleElement = *oldRoles;
+                            rolesBuilder << BSON("role" << roleElement.String() <<
+                                                 "db" << otherDBRoles.fieldNameStringData());
+                        }
+                    }
+                }
+            }
+        }
+        BSONObj update = updateBuilder.obj();
+
+        uassertStatusOK(externalState->updateOne(
+                                AuthorizationManager::usersAltCollectionNamespace,
+                                query,
+                                update,
+                                true,
+                                writeConcern));
+    }
+
+    /**
+     * For every schemaVersion24 user document in the system.users collection of "db",
+     * upserts the appropriate schemaVersion26Upgrade user document in usersAltCollectionNamespace.
+     */
+    Status upgradeUsersFromDB(AuthzManagerExternalState* externalState,
+                             const StringData& db,
+                             const BSONObj& writeConcern) {
+        log() << "Auth schema upgrade processing schema version " <<
+            AuthorizationManager::schemaVersion24 << " users from database " << db;
+        return externalState->query(
+                NamespaceString(db, "system.users"),
+                BSONObj(),
+                BSONObj(),
+                boost::bind(upgradeProcessUser, externalState, db, _1, writeConcern));
+    }
+
+    /**
+     * Inserts "document" into "collection", throwing a DBException on failure.
+     */
+    void uassertInsertIntoCollection(
+            AuthzManagerExternalState* externalState,
+            const NamespaceString& collection,
+            const BSONObj& document,
+            const BSONObj& writeConcern) {
+        uassertStatusOK(externalState->insert(collection, document, writeConcern));
+    }
+
+    /**
+     * Copies the contents of "sourceCollection" into "targetCollection", which must be a distinct
+     * collection.
+     */
+    Status copyCollectionContents(
+            AuthzManagerExternalState* externalState,
+            const NamespaceString& targetCollection,
+            const NamespaceString& sourceCollection,
+            const BSONObj& writeConcern) {
+        return externalState->query(
+                sourceCollection,
+                BSONObj(),
+                BSONObj(),
+                boost::bind(uassertInsertIntoCollection,
+                            externalState,
+                            targetCollection,
+                            _1,
+                            writeConcern));
+    }
+
+    /**
+     * Upgrades auth schema from schemaVersion24 to schemaVersion26Upgrade.
+     *
+     * Assumes that the current version is schemaVersion24.
+     *
+     * - Backs up usersCollectionNamespace into usersBackupCollectionNamespace.
+     * - Empties usersAltCollectionNamespace.
+     * - Builds usersAltCollectionNamespace from the contents of every database's system.users
+     *   collection.
+     * - Manipulates the schema version document appropriately.
+     *
+     * Upon successful completion, system is in schemaVersion26Upgrade.  On failure,
+     * system is in schemaVersion24 or schemaVersion26Upgrade, but it is safe to re-run this
+     * method.
+     */
+    Status buildNewUsersCollection(
+            AuthzManagerExternalState* externalState,
+            const BSONObj& writeConcern) {
+
+        // Write an explicit schemaVersion24 into the schema version document, to facilitate
+        // recovery.
+        Status status = externalState->updateOne(
+                AuthorizationManager::versionCollectionNamespace,
+                AuthorizationManager::versionDocumentQuery,
+                BSON("$set" << BSON(AuthorizationManager::schemaVersionFieldName <<
+                                    AuthorizationManager::schemaVersion24)),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade erasing contents of " <<
+            AuthorizationManager::usersBackupCollectionNamespace;
+        int numRemoved;
+        status = externalState->remove(
+                AuthorizationManager::usersBackupCollectionNamespace,
+                BSONObj(),
+                writeConcern,
+                &numRemoved);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade backing up " <<
+            AuthorizationManager::usersCollectionNamespace << " into " <<
+            AuthorizationManager::usersBackupCollectionNamespace;
+        status = copyCollectionContents(
+                externalState,
+                AuthorizationManager::usersBackupCollectionNamespace,
+                AuthorizationManager::usersCollectionNamespace,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade dropping indexes from " <<
+            AuthorizationManager::usersAltCollectionNamespace;
+        status = externalState->dropIndexes(AuthorizationManager::usersAltCollectionNamespace,
+                                            writeConcern);
+        if (!status.isOK()) {
+            warning() << "Auth schema upgrade failed to drop indexes on " <<
+                AuthorizationManager::usersAltCollectionNamespace << " (" << status << ")";
+        }
+
+        log() << "Auth schema upgrade erasing contents of " <<
+            AuthorizationManager::usersAltCollectionNamespace;
+        status = externalState->remove(
+                AuthorizationManager::usersAltCollectionNamespace,
+                BSONObj(),
+                writeConcern,
+                &numRemoved);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        log() << "Auth schema upgrade creating needed indexes of " <<
+            AuthorizationManager::usersAltCollectionNamespace;
+        status = externalState->createIndex(
+                AuthorizationManager::usersAltCollectionNamespace,
+                BSON("user" << 1 << "db" << 1),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+
+        // Update usersAltCollectionNamespace from the contents of each database's system.users
+        // collection.
+        std::vector<std::string> dbNames;
+        status = externalState->getAllDatabaseNames(&dbNames);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
+        for (size_t i = 0; i < dbNames.size(); ++i) {
+            const std::string& db = dbNames[i];
+            status = upgradeUsersFromDB(externalState, db, writeConcern);
+            if (!status.isOK())
+                return logUpgradeFailed(status);
+        }
+
+        // Switch to schemaVersion26Upgrade.  Starting after this point, user information will be
+        // read from usersAltCollectionNamespace.
+        status = externalState->updateOne(
+                AuthorizationManager::versionCollectionNamespace,
+                AuthorizationManager::versionDocumentQuery,
+                BSON("$set" << BSON(AuthorizationManager::schemaVersionFieldName <<
+                                    AuthorizationManager::schemaVersion26Upgrade)),
+                true,
+                writeConcern);
+        if (!status.isOK())
+            return logUpgradeFailed(status);
         return Status::OK();
     }
 
