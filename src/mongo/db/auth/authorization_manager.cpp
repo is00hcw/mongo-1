@@ -760,8 +760,18 @@ namespace {
     }
 
     /**
-     * Parses privDoc and initializes the user's "roles" field with the role list extracted
-     * from the privilege document.
+     * Logs that the auth schema upgrade failed because of "status" and returns "status".
+     */
+    Status logUpgradeFailed(const Status& status) {
+        log() << "Auth schema upgrade failed with " << status;
+        return status;
+    }
+
+    /**
+     * Upserts a schemaVersion26Upgrade user document in the usersAltCollectionNamespace
+     * according to the schemaVersion24 user document "oldUserDoc" from database "sourceDB".
+     *
+     * Throws a DBException on errors.
      */
     void upgradeProcessUser(AuthzManagerExternalState* externalState,
                             const StringData& sourceDB,
