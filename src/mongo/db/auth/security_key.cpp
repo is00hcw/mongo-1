@@ -26,6 +26,7 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/client/sasl_client_authenticate.h"
+#include "mongo/util/password_digest.h"
 
 static bool authParamsSet = false;
 
@@ -128,18 +129,21 @@ namespace mongo {
             return false;
         }
 
-        LOG(1) << "security key: " << str << endl;
+        User::CredentialData credentials;
+        credentials.password = mongo::createPasswordDigest(
+                internalSecurity.user->getName().getUser().toString(), str);
+        internalSecurity.user->setCredentials(credentials);
 
-        // createPWDigest should really not be a member func
-        DBClientConnection conn;
-        internalSecurity.pwd = conn.createPasswordDigest(internalSecurity.user, str);
-
-        if (cmdLine.clusterAuthMode == "keyfile" || cmdLine.clusterAuthMode == "sendKeyfile") {
-            setInternalUserAuthParams(BSON(saslCommandMechanismFieldName << "MONGODB-CR" <<
-                                      saslCommandUserSourceFieldName << "local" <<
-                                      saslCommandUserFieldName << internalSecurity.user <<
-                                      saslCommandPasswordFieldName << internalSecurity.pwd <<
-                                      saslCommandDigestPasswordFieldName << false));
+        int clusterAuthMode = serverGlobalParams.clusterAuthMode.load();
+        if (clusterAuthMode == ServerGlobalParams::ClusterAuthMode_keyFile ||
+            clusterAuthMode == ServerGlobalParams::ClusterAuthMode_sendKeyFile) {
+            setInternalUserAuthParams(
+                    BSON(saslCommandMechanismFieldName << "MONGODB-CR" <<
+                         saslCommandUserDBFieldName <<
+                         internalSecurity.user->getName().getDB() <<
+                         saslCommandUserFieldName << internalSecurity.user->getName().getUser() <<
+                         saslCommandPasswordFieldName << credentials.password <<
+                         saslCommandDigestPasswordFieldName << false));
         }
         return true;
     }

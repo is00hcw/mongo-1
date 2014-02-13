@@ -84,8 +84,9 @@ env.CppUnitTest('text_test', 'util/text_test.cpp', LIBDEPS=['foundation'])
 
 env.StaticLibrary('stringutils', ['util/stringutils.cpp', 'util/base64.cpp',])
 
-env.StaticLibrary('md5', [
-        'util/md5.cpp'
+env.Library('md5', [
+        'util/md5.cpp',
+        'util/password_digest.cpp',
         ])
 
 env.CppUnitTest( "stringutils_test", [ "util/stringutils_test.cpp" ],
@@ -154,9 +155,68 @@ env.CppUnitTest('sock_test', ['util/net/sock_test.cpp'],
                 LIBDEPS=['mongocommon', 'notmongodormongos'],
                 NO_CRUTCH=True)
 
-env.StaticLibrary( 'mongohasher', [ "db/hasher.cpp" ] )
+env.Library('index_names',["db/index_names.cpp"])
 
+env.Library( 'mongohasher', [ "db/hasher.cpp" ] )
 
+env.Library('synchronization', [ 'util/concurrency/synchronization.cpp' ])
+
+env.Library('auth_helpers', ['client/auth_helpers.cpp'])
+
+env.Library('spin_lock', ["util/concurrency/spin_lock.cpp"])
+env.CppUnitTest('spin_lock_test', ['util/concurrency/spin_lock_test.cpp'],
+                LIBDEPS=['spin_lock', '$BUILD_DIR/third_party/shim_boost'])
+
+env.Library('network', [
+            "util/net/sock.cpp",
+            "util/net/socket_poll.cpp",
+            "util/net/ssl_manager.cpp",
+            "util/net/ssl_options.cpp",
+            "util/net/httpclient.cpp",
+            "util/net/message.cpp",
+            "util/net/message_port.cpp",
+            "util/net/listen.cpp" ],
+            LIBDEPS=['$BUILD_DIR/mongo/util/options_parser/options_parser',
+                     'background_job',
+                     'fail_point',
+                     'foundation',
+                     'server_options_core',
+            ])
+
+env.Library('clientdriver', [
+            "client/connpool.cpp",
+            "client/dbclient.cpp",
+            "client/dbclient_rs.cpp",
+            "client/dbclientcursor.cpp",
+            "client/replica_set_monitor.cpp",
+            'client/sasl_client_authenticate.cpp',
+            "client/syncclusterconnection.cpp",
+            "db/dbmessage.cpp"
+            ],
+            LIBDEPS=['auth_helpers',
+                     'network',
+            ])
+
+env.CppUnitTest("replica_set_monitor_test",
+                ["client/replica_set_monitor_test.cpp"],
+                LIBDEPS=["clientdriver"])
+
+env.Library('lasterror', [
+            "db/lasterror.cpp",
+            ],
+            LIBDEPS=['network',
+                     'foundation',
+            ])
+
+env.Library('version',
+            [
+                'buildinfo.cpp',
+                'util/version.cpp'
+            ],
+            LIBDEPS=[
+                'bson',
+                '$BUILD_DIR/mongo/base/base'
+            ])
 commonFiles = [ "pch.cpp",
                 "buildinfo.cpp",
                 "db/lasterror.cpp",
