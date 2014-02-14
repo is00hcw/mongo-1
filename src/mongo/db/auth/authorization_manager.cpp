@@ -48,8 +48,18 @@ namespace mongo {
     const std::string AuthorizationManager::USER_SOURCE_FIELD_NAME = "userSource";
     const std::string AuthorizationManager::PASSWORD_FIELD_NAME = "pwd";
 
-    bool AuthorizationManager::_doesSupportOldStylePrivileges = true;
-    bool AuthorizationManager::_authEnabled = false;
+    const NamespaceString AuthorizationManager::adminCommandNamespace("admin.$cmd");
+    const NamespaceString AuthorizationManager::rolesCollectionNamespace("admin.system.roles");
+    const NamespaceString AuthorizationManager::usersAltCollectionNamespace(
+            "admin.system.new_users");
+    const NamespaceString AuthorizationManager::usersBackupCollectionNamespace(
+            "admin.system.backup_users");
+    const NamespaceString AuthorizationManager::usersCollectionNamespace("admin.system.users");
+    const NamespaceString AuthorizationManager::versionCollectionNamespace("admin.system.version");
+    const NamespaceString AuthorizationManager::defaultTempUsersCollectionNamespace(
+            "admin.tempusers");
+    const NamespaceString AuthorizationManager::defaultTempRolesCollectionNamespace(
+            "admin.temproles");
 
 namespace {
     const std::string ADMIN_DBNAME = "admin";

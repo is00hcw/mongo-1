@@ -57,8 +57,55 @@ namespace mongo {
         static const std::string CLUSTER_RESOURCE_NAME;
 
         static const std::string USER_NAME_FIELD_NAME;
-        static const std::string USER_SOURCE_FIELD_NAME;
+        static const std::string USER_DB_FIELD_NAME;
+        static const std::string ROLE_NAME_FIELD_NAME;
+        static const std::string ROLE_SOURCE_FIELD_NAME; // TODO: rename to ROLE_DB_FIELD_NAME
         static const std::string PASSWORD_FIELD_NAME;
+        static const std::string V1_USER_NAME_FIELD_NAME;
+        static const std::string V1_USER_SOURCE_FIELD_NAME;
+
+        static const NamespaceString adminCommandNamespace;
+        static const NamespaceString rolesCollectionNamespace;
+        static const NamespaceString usersAltCollectionNamespace;
+        static const NamespaceString usersBackupCollectionNamespace;
+        static const NamespaceString usersCollectionNamespace;
+        static const NamespaceString versionCollectionNamespace;
+        static const NamespaceString defaultTempUsersCollectionNamespace; // for mongorestore
+        static const NamespaceString defaultTempRolesCollectionNamespace; // for mongorestore
+
+        /**
+         * Query to match the auth schema version document in the versionCollectionNamespace.
+         */
+        static const BSONObj versionDocumentQuery;
+
+        /**
+         * Name of the field in the auth schema version document containing the current schema
+         * version.
+         */
+        static const std::string schemaVersionFieldName;
+
+        /**
+         * Value used to represent that the schema version is not cached or invalid.
+         */
+        static const int schemaVersionInvalid = 0;
+
+        /**
+         * Auth schema version for MongoDB v2.4 and prior.
+         */
+        static const int schemaVersion24 = 1;
+
+        /**
+         * Auth schema version for MongoDB v2.6 during the upgrade process.  Same as
+         * schemaVersion26Final, except that user documents are found in admin.new.users, and user
+         * management commands are disabled.
+         */
+        static const int schemaVersion26Upgrade = 2;
+
+        /**
+         * Auth schema version for MongoDB 2.6.  Users are stored in admin.system.users,
+         * roles in admin.system.roles.
+         */
+        static const int schemaVersion26Final = 3;
 
         // TODO: Make the following functions no longer static.
 

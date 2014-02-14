@@ -121,7 +121,8 @@ namespace mongo {
     int Tool::main( int argc , char ** argv ) {
         static StaticObserver staticObserver;
 
-        _name = argv[0];
+        setGlobalAuthorizationManager(new AuthorizationManager(
+                new AuthzManagerExternalStateMock()));
 
         /* using the same style as db.cpp */
         int command_line_style = (((po::command_line_style::unix_style ^
