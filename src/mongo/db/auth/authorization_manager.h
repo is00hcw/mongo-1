@@ -74,9 +74,46 @@ namespace mongo {
         static bool getSupportOldStylePrivilegeDocuments();
 
         /**
-         * Sets whether or not access control enforcement is enabled for this whole server.
+         * Takes a vector of privileges and fills the output param "resultArray" with a BSON array
+         * representation of the privileges.
          */
-        static void setAuthEnabled(bool enabled);
+        static Status getBSONForPrivileges(const PrivilegeVector& privileges,
+                                           mutablebson::Element resultArray);
+
+        /**
+         * Takes a role name and a role graph and fills the output param "result" with a BSON
+         * representation of the role object.
+         * This function does no locking - it is up to the caller to synchronize access to the
+         * role graph.
+         * Note: The passed in RoleGraph can't be marked const because some of its accessors can
+         * actually modify it internally (to set up built-in roles).
+         */
+        static Status getBSONForRole(/*const*/ RoleGraph* graph,
+                                     const RoleName& roleName,
+                                     mutablebson::Element result);
+
+
+        /**
+         * Sets whether or not access control enforcement is enabled for this manager.
+         */
+        void setAuthEnabled(bool enabled);
+
+        /**
+         * Returns true if access control is enabled for this manager .
+         */
+        bool isAuthEnabled() const;
+
+        /**
+         * Returns via the output parameter "version" the version number of the authorization
+         * system.  Returns Status::OK() if it was able to successfully fetch the current
+         * authorization version.  If it has problems fetching the most up to date version it
+         * returns a non-OK status.  When returning a non-OK status, *version will be set to
+         * schemaVersionInvalid (0).
+         */
+        Status getAuthorizationVersion(int* version);
+
+        // Returns true if there exists at least one privilege document in the system.
+        bool hasAnyPrivilegeDocuments() const;
 
         /**
          * Returns true if access control is enabled on this server.

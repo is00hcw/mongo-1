@@ -21,9 +21,20 @@
 
 namespace mongo {
 
-namespace{
-    AuthorizationManager* globalAuthManager = NULL;
-}
+    void AuthzVersionParameter::append(BSONObjBuilder& b, const std::string& name) {
+        int authzVersion;
+        uassertStatusOK(getGlobalAuthorizationManager()->getAuthorizationVersion(&authzVersion));
+        b.append(name, authzVersion);
+    }
+
+    Status AuthzVersionParameter::set(const BSONElement& newValueElement) {
+        return Status(ErrorCodes::InternalError, "set called on unsettable server parameter");
+    }
+
+    Status AuthzVersionParameter::setFromString(const std::string& newValueString) {
+        return Status(ErrorCodes::InternalError, "set called on unsettable server parameter");
+    }
+}  // namespace
 
     void setGlobalAuthorizationManager(AuthorizationManager* authManager) {
         fassert(16841, globalAuthManager == NULL);
