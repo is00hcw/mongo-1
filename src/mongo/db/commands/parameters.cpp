@@ -18,13 +18,17 @@
 
 #include "mongo/pch.h"
 
-#include "mongo/client/dbclient_rs.h"
+#include "mongo/client/replica_set_monitor.h"
+#include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/security_key.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/cmdline.h"
 #include "mongo/db/server_parameters.h"
-#include "mongo/db/storage/env.h"
-#include "mongo/s/shard.h"
+#include "mongo/db/storage_options.h"
+#include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/ssl_manager.h"
+#include "mongo/util/net/ssl_options.h"
 
 namespace mongo {
 
@@ -176,17 +180,186 @@ namespace mongo {
     } cmdSet;
 
     namespace {
-        ExportedServerParameter<int> LogLevelSetting( ServerParameterSet::getGlobal(),
-                                                      "logLevel",
-                                                      &logLevel,
-                                                      true,
-                                                      true );
+        class LogLevelSetting : public ServerParameter {
+        public:
+            LogLevelSetting() : ServerParameter(ServerParameterSet::getGlobal(), "logLevel") {}
 
-        ExportedServerParameter<bool> NoTableScanSetting( ServerParameterSet::getGlobal(),
-                                                          "notablescan",
-                                                          &cmdLine.noTableScan,
-                                                          true,
-                                                          true );
+            virtual void append(BSONObjBuilder& b, const std::string& name) {
+                b << name << logger::globalLogDomain()->getMinimumLogSeverity().toInt();
+            }
+
+            virtual Status set(const BSONElement& newValueElement) {
+                typedef logger::LogSeverity LogSeverity;
+                int newValue;
+                if (!newValueElement.coerce(&newValue) || newValue < 0)
+                    return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                  "Invalid value for logLevel: " << newValueElement);
+                LogSeverity newSeverity = (newValue > 0) ? LogSeverity::Debug(newValue) :
+                    LogSeverity::Log();
+                logger::globalLogDomain()->setMinimumLoggedSeverity(newSeverity);
+                return Status::OK();
+            }
+
+            virtual Status setFromString(const std::string& str) {
+                typedef logger::LogSeverity LogSeverity;
+                int newValue;
+                Status status = parseNumberFromString(str, &newValue);
+                if (!status.isOK())
+                    return status;
+                if (newValue < 0)
+                    return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                  "Invalid value for logLevel: " << newValue);
+                LogSeverity newSeverity = (newValue > 0) ? LogSeverity::Debug(newValue) :
+                    LogSeverity::Log();
+                logger::globalLogDomain()->setMinimumLoggedSeverity(newSeverity);
+                return Status::OK();
+            }
+        } logLevelSetting;
+
+        class SSLModeSetting : public ServerParameter {
+        public:
+            SSLModeSetting() : ServerParameter(ServerParameterSet::getGlobal(), "sslMode",
+                                               false, // allowedToChangeAtStartup
+                                               true // allowedToChangeAtRuntime
+                                              ) {}
+
+            std::string sslModeStr() {
+                switch (sslGlobalParams.sslMode.load()) {
+                    case SSLGlobalParams::SSLMode_disabled:
+                        return "disabled";
+                    case SSLGlobalParams::SSLMode_allowSSL:
+                        return "allowSSL";
+                    case SSLGlobalParams::SSLMode_preferSSL:
+                        return "preferSSL";
+                    case SSLGlobalParams::SSLMode_requireSSL:
+                        return "requireSSL";
+                    default:
+                        return "undefined";
+                }
+            }
+
+            virtual void append(BSONObjBuilder& b, const std::string& name) {
+                b << name << sslModeStr();
+            }
+
+            virtual Status set(const BSONElement& newValueElement) {
+                try {
+                    return setFromString(newValueElement.String());
+                }
+                catch (MsgAssertionException msg) {
+                    return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                    "Invalid value for sslMode via setParameter command: " 
+                                    << newValueElement);
+                }
+
+            }
+
+            virtual Status setFromString(const std::string& str) {
+#ifndef MONGO_SSL
+                return Status(ErrorCodes::IllegalOperation, mongoutils::str::stream() <<
+                                "Unable to set sslMode, SSL support is not compiled into server");
+#endif
+                if (str != "disabled" && str != "allowSSL" &&
+                    str != "preferSSL" && str != "requireSSL") { 
+                        return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                    "Invalid value for sslMode via setParameter command: " 
+                                    << str);
+                }
+
+                int oldMode = sslGlobalParams.sslMode.load();
+                if (str == "preferSSL" && oldMode == SSLGlobalParams::SSLMode_allowSSL) {
+                    sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_preferSSL);
+                }
+                else if (str == "requireSSL" && oldMode == SSLGlobalParams::SSLMode_preferSSL) {
+                    sslGlobalParams.sslMode.store(SSLGlobalParams::SSLMode_requireSSL);
+                }
+                else {
+                    return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                    "Illegal state transition for sslMode, attempt to change from "
+                                    << sslModeStr() << " to " << str);
+                }
+                return Status::OK();
+            }
+        } sslModeSetting;
+        
+        class ClusterAuthModeSetting : public ServerParameter {
+        public:
+            ClusterAuthModeSetting() : 
+                ServerParameter(ServerParameterSet::getGlobal(), "clusterAuthMode",
+                                false, // allowedToChangeAtStartup
+                                true // allowedToChangeAtRuntime
+                               ) {}
+
+            std::string clusterAuthModeStr() {
+                switch (serverGlobalParams.clusterAuthMode.load()) {
+                    case ServerGlobalParams::ClusterAuthMode_keyFile:
+                        return "keyFile";
+                    case ServerGlobalParams::ClusterAuthMode_sendKeyFile:
+                        return "sendKeyFile";
+                    case ServerGlobalParams::ClusterAuthMode_sendX509:
+                        return "sendX509";
+                    case ServerGlobalParams::ClusterAuthMode_x509:
+                        return "x509";
+                    default:
+                        return "undefined";
+                }
+            }
+
+            virtual void append(BSONObjBuilder& b, const std::string& name) {
+                b << name << clusterAuthModeStr();
+            }
+
+            virtual Status set(const BSONElement& newValueElement) {
+                try {
+                    return setFromString(newValueElement.String());
+                }
+                catch (MsgAssertionException msg) {
+                    return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                    "Invalid value for clusterAuthMode via setParameter command: " 
+                                    << newValueElement);
+                }
+
+            }
+
+            virtual Status setFromString(const std::string& str) {
+#ifndef MONGO_SSL
+                return Status(ErrorCodes::IllegalOperation, mongoutils::str::stream() <<
+                                "Unable to set clusterAuthMode, " <<
+                                "SSL support is not compiled into server");
+#endif
+                if (str != "keyFile" && str != "sendKeyFile" &&
+                    str != "sendX509" && str != "x509") { 
+                        return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                    "Invalid value for clusterAuthMode via setParameter command: "
+                                    << str);
+                }
+
+                int oldMode = serverGlobalParams.clusterAuthMode.load();
+                if (str == "sendX509" && 
+                    oldMode == ServerGlobalParams::ClusterAuthMode_sendKeyFile) {
+                    serverGlobalParams.clusterAuthMode.store
+                        (ServerGlobalParams::ClusterAuthMode_sendX509);
+#ifdef MONGO_SSL
+                    setInternalUserAuthParams(BSON(saslCommandMechanismFieldName << 
+                                              "MONGODB-X509" <<
+                                              saslCommandUserDBFieldName << "$external" <<
+                                              saslCommandUserFieldName << 
+                                              getSSLManager()->getClientSubjectName()));
+#endif 
+                }
+                else if (str == "x509" && 
+                    oldMode == ServerGlobalParams::ClusterAuthMode_sendX509) {
+                    serverGlobalParams.clusterAuthMode.store
+                        (ServerGlobalParams::ClusterAuthMode_x509);
+                }
+                else {
+                    return Status(ErrorCodes::BadValue, mongoutils::str::stream() <<
+                                  "Illegal state transition for clusterAuthMode, change from "
+                                  << clusterAuthModeStr() << " to " << str);
+                }
+                return Status::OK();
+            }
+        } clusterAuthModeSetting;
 
         ExportedServerParameter<bool> QuietSetting( ServerParameterSet::getGlobal(),
                                                     "quiet",
