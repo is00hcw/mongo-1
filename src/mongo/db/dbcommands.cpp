@@ -189,7 +189,18 @@ namespace mongo {
 
                     long long passes = 0;
                     char buf[32];
-                    GTID gtid = c.getLastOp();
+                    BSONElement gtide = cmdObj["wgtid"];
+                    GTID gtid;
+                    if (gtide.ok()) {
+                        if (!isValidGTID(gtide)) {
+                            errmsg = "invalid gtid";
+                            return false;
+                        }
+                        gtid = getGTIDFromBSON("wgtid",cmdObj);
+                    }
+                    else {
+                        gtid = c.getLastOp();
+                    }
 
                     if ( gtid.isInitial() ) {
                         if ( anyReplEnabled() ) {
