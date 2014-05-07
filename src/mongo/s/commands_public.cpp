@@ -1795,6 +1795,23 @@ namespace mongo {
             }
         } evalCmd;
 
+        class ShowSizesCmd : public PublicGridCommand {
+        public:
+            ShowSizesCmd() : PublicGridCommand( "showSizes" ) {}
+            virtual void addRequiredPrivileges(const std::string& dbname,
+                                               const BSONObj& cmdObj,
+                                               std::vector<Privilege>* out) {} // no auth needed
+            virtual bool run(const string& dbName,
+                             BSONObj& cmdObj,
+                             int,
+                             string&,
+                             BSONObjBuilder& result,
+                             bool) {
+                DBConfigPtr conf = grid.getDBConfig( dbName , false );
+                return passthrough( conf , cmdObj , result );
+            }
+        } showSizesCmd;
+
         /*
           Note these are in the pub_grid_cmds namespace, so they don't
           conflict with those in db/commands/pipeline_command.cpp.
