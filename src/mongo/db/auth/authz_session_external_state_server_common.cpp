@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/db/auth/authz_session_external_state_server_common.h"
@@ -34,11 +46,11 @@ namespace {
     AuthzSessionExternalStateServerCommon::AuthzSessionExternalStateServerCommon(
             AuthorizationManager* authzManager) :
                     AuthzSessionExternalState(authzManager),
-                    _allowLocalhost(true) {}
+                    _allowLocalhost(enableLocalhostAuthBypass) {}
     AuthzSessionExternalStateServerCommon::~AuthzSessionExternalStateServerCommon() {}
 
     void AuthzSessionExternalStateServerCommon::_checkShouldAllowLocalhost() {
-        if (!AuthorizationManager::isAuthEnabled())
+        if (!_authzManager->isAuthEnabled())
             return;
         // If we know that an admin user exists, don't re-check.
         if (!_allowLocalhost)
@@ -49,7 +61,7 @@ namespace {
             return;
         }
 
-        _allowLocalhost = !_authzManager->hasPrivilegeDocument("admin");
+        _allowLocalhost = !_authzManager->hasAnyPrivilegeDocuments();
         if (_allowLocalhost) {
             ONCE {
                 log() << "note: no users configured in admin.system.users, allowing localhost "
@@ -60,8 +72,8 @@ namespace {
 
     bool AuthzSessionExternalStateServerCommon::shouldIgnoreAuthChecks() const {
         ClientBasic* client = ClientBasic::getCurrent();
-        return !AuthorizationManager::isAuthEnabled() ||
-                (enableLocalhostAuthBypass &&client->getIsLocalHostConnection() && _allowLocalhost);
+        return !_authzManager->isAuthEnabled() ||
+                (_allowLocalhost && client->getIsLocalHostConnection());
     }
 
 } // namespace mongo

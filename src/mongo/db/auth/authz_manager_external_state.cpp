@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/db/auth/authz_manager_external_state.h"
@@ -20,7 +32,7 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/security_key.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -41,12 +53,14 @@ namespace mongo {
                           mongoutils::str::stream() << "Bad database name \"" << dbname << "\"");
         }
 
+        const bool isUserFromTargetDB = (dbname == userName.getDB());
+
         // Build the query needed to get the privilege document
-        std::string usersNamespace;
+
         BSONObjBuilder queryBuilder;
-        usersNamespace = mongoutils::str::stream() << dbname << ".system.users";
+        const NamespaceString usersNamespace(dbname, "system.users");
         queryBuilder.append(AuthorizationManager::V1_USER_NAME_FIELD_NAME, userName.getUser());
-        if (dbname == userName.getDB()) {
+        if (isUserFromTargetDB) {
             queryBuilder.appendNull(AuthorizationManager::V1_USER_SOURCE_FIELD_NAME);
         }
         else {
@@ -55,23 +69,35 @@ namespace mongo {
 
         // Query for the privilege document
         BSONObj userBSONObj;
-        Status found = _findUser(usersNamespace, queryBuilder.done(), &userBSONObj);
+        Status found = findOne(usersNamespace, queryBuilder.done(), &userBSONObj);
         if (!found.isOK()) {
-            if (found.code() == ErrorCodes::UserNotFound) {
+            if (found.code() == ErrorCodes::NoMatchingDocument) {
                 // Return more detailed status that includes user name.
                 return Status(ErrorCodes::UserNotFound,
-                              "key file must be used to log in with internal user",
-                              15889);
+                              mongoutils::str::stream() << "auth: couldn't find user " <<
+                              userName.toString() << ", " << usersNamespace.ns(),
+                              0);
+            } else {
+                return found;
             }
-            *result = BSON(AuthorizationManager::USER_NAME_FIELD_NAME <<
-                           internalSecurity.user <<
-                           AuthorizationManager::PASSWORD_FIELD_NAME <<
-                           internalSecurity.pwd).getOwned();
-            return Status::OK();
         }
 
-        std::string usersNamespace = dbname + ".system.users";
+        if (isUserFromTargetDB) {
+            if (userBSONObj[AuthorizationManager::PASSWORD_FIELD_NAME].eoo()) {
+                return Status(ErrorCodes::AuthSchemaIncompatible, mongoutils::str::stream() <<
+                              "User documents with schema version " <<
+                              AuthorizationManager::schemaVersion24 <<
+                              " must have a \"" <<
+                              AuthorizationManager::PASSWORD_FIELD_NAME <<
+                              "\" field.");
+            }
+        }
 
+        *result = userBSONObj.getOwned();
+        return Status::OK();
+    }
+
+    bool AuthzManagerExternalState::hasAnyPrivilegeDocuments() {
         BSONObj userBSONObj;
         Status status = findOne(
                 AuthorizationManager::usersCollectionNamespace,
@@ -100,29 +126,70 @@ namespace mongo {
                           mongoutils::str::stream() << "User \"" << name << "@" << source <<
                                   "\" already exists");
         }
-        else {
-            queryBuilder.append(AuthorizationManager::USER_SOURCE_FIELD_NAME,
-                                userName.getDB());
+        if (status.code() == ErrorCodes::UnknownError) {
+            return Status(ErrorCodes::UserModificationFailed, status.reason());
         }
-
-        bool found = _findUser(usersNamespace, queryBuilder.obj(), &userBSONObj);
-        if (!found) {
-            return Status(ErrorCodes::UserNotFound,
-                          mongoutils::str::stream() << "auth: couldn't find user " <<
-                          userName.toString() << ", " << usersNamespace,
-                          0);
-        }
-
-        *result = userBSONObj.getOwned();
-        return Status::OK();
+        return status;
     }
 
-    bool AuthzManagerExternalState::hasAnyPrivilegeDocuments() {
-        std::string usersNamespace = "admin.system.users";
+    Status AuthzManagerExternalState::updatePrivilegeDocument(
+            const UserName& user, const BSONObj& updateObj, const BSONObj& writeConcern) {
+        Status status = updateOne(
+                NamespaceString("admin.system.users"),
+                BSON(AuthorizationManager::USER_NAME_FIELD_NAME << user.getUser() <<
+                     AuthorizationManager::USER_DB_FIELD_NAME << user.getDB()),
+                updateObj,
+                false,
+                writeConcern);
+        if (status.isOK()) {
+            return status;
+        }
+        if (status.code() == ErrorCodes::NoMatchingDocument) {
+            return Status(ErrorCodes::UserNotFound,
+                          mongoutils::str::stream() << "User " << user.getFullName() <<
+                                  " not found");
+        }
+        if (status.code() == ErrorCodes::UnknownError) {
+            return Status(ErrorCodes::UserModificationFailed, status.reason());
+        }
+        return status;
+    }
 
-        BSONObj userBSONObj;
-        BSONObj query;
-        return _findUser(usersNamespace, query, &userBSONObj);
+    Status AuthzManagerExternalState::removePrivilegeDocuments(const BSONObj& query,
+                                                               const BSONObj& writeConcern,
+                                                               int* numRemoved) {
+        Status status = remove(NamespaceString("admin.system.users"),
+                               query,
+                               writeConcern,
+                               numRemoved);
+        if (status.code() == ErrorCodes::UnknownError) {
+            return Status(ErrorCodes::UserModificationFailed, status.reason());
+        }
+        return status;
+    }
+
+    Status AuthzManagerExternalState::updateOne(
+            const NamespaceString& collectionName,
+            const BSONObj& query,
+            const BSONObj& updatePattern,
+            bool upsert,
+            const BSONObj& writeConcern) {
+        int nMatched;
+        Status status = update(collectionName,
+                               query,
+                               updatePattern,
+                               upsert,
+                               false,
+                               writeConcern,
+                               &nMatched);
+        if (!status.isOK()) {
+            return status;
+        }
+        dassert(nMatched == 1 || nMatched == 0);
+        if (nMatched == 0) {
+            return Status(ErrorCodes::NoMatchingDocument, "No document found");
+        }
+        return Status::OK();
     }
 
 }  // namespace mongo

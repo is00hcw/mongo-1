@@ -15,11 +15,13 @@
 
 #pragma once
 
+#include <iosfwd>
 #include <string>
 
+#include <boost/scoped_ptr.hpp>
+
+#include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
-// TODO: Import hash namespace code
-//#include "mongo/platform/hash_namespace.h"
 
 namespace mongo {
 
@@ -70,16 +72,79 @@ namespace mongo {
         return lhs.getFullName() < rhs.getFullName();
     }
 
-}  // namespace mongo
+    std::ostream& operator<<(std::ostream& os, const UserName& name);
 
-// Define hash function for UserNames so they can be keys in std::unordered_map
-// TODO: Import hash namespace code
-#if 0
-MONGO_HASH_NAMESPACE_START
-    template <> struct hash<mongo::UserName> {
-        size_t operator()(const mongo::UserName& pname) const {
-            return hash<std::string>()(pname.getFullName());
+    /**
+     * Iterator over an unspecified container of UserName objects.
+     */
+    class UserNameIterator {
+    public:
+        class Impl {
+            MONGO_DISALLOW_COPYING(Impl);
+        public:
+            Impl() {};
+            virtual ~Impl() {};
+            static Impl* clone(Impl* orig) { return orig ? orig->doClone(): NULL; }
+            virtual bool more() const = 0;
+            virtual const UserName& get() const = 0;
+
+            virtual const UserName& next() = 0;
+
+        private:
+            virtual Impl* doClone() const = 0;
+        };
+
+        UserNameIterator() : _impl(NULL) {}
+        UserNameIterator(const UserNameIterator& other) : _impl(Impl::clone(other._impl.get())) {}
+        explicit UserNameIterator(Impl* impl) : _impl(impl) {}
+
+        UserNameIterator& operator=(const UserNameIterator& other) {
+            _impl.reset(Impl::clone(other._impl.get()));
+            return *this;
         }
+
+        bool more() const { return _impl.get() && _impl->more(); }
+        const UserName& get() const { return _impl->get(); }
+
+        const UserName& next() { return _impl->next(); }
+
+        const UserName& operator*() const { return get(); }
+        const UserName* operator->() const { return &get(); }
+
+    private:
+        boost::scoped_ptr<Impl> _impl;
     };
-MONGO_HASH_NAMESPACE_END
-#endif
+
+
+    template <typename ContainerIterator>
+    class UserNameContainerIteratorImpl : public UserNameIterator::Impl {
+        MONGO_DISALLOW_COPYING(UserNameContainerIteratorImpl);
+    public:
+        UserNameContainerIteratorImpl(const ContainerIterator& begin,
+                                      const ContainerIterator& end) :
+            _curr(begin), _end(end) {}
+        virtual ~UserNameContainerIteratorImpl() {}
+        virtual bool more() const { return _curr != _end; }
+        virtual const UserName& next() { return *(_curr++); }
+        virtual const UserName& get() const { return *_curr; }
+        virtual UserNameIterator::Impl* doClone() const {
+            return new UserNameContainerIteratorImpl(_curr, _end);
+        }
+
+    private:
+        ContainerIterator _curr;
+        ContainerIterator _end;
+    };
+
+    template <typename ContainerIterator>
+    UserNameIterator makeUserNameIterator(const ContainerIterator& begin,
+                                          const ContainerIterator& end) {
+        return UserNameIterator( new UserNameContainerIteratorImpl<ContainerIterator>(begin, end));
+    }
+
+    template <typename Container>
+    UserNameIterator makeUserNameIteratorForContainer(const Container& container) {
+        return makeUserNameIterator(container.begin(), container.end());
+    }
+
+}  // namespace mongo

@@ -23,7 +23,7 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/namespacestring.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/map_util.h"
 
@@ -33,107 +33,44 @@
 namespace mongo {
 namespace {
 
-    TEST(AuthorizationSessionTest, AcquirePrivilegeAndCheckAuthorization) {
-        Principal* principal = new Principal(UserName("Spencer", "test"));
-        ActionSet actions;
-        actions.addAction(ActionType::insert);
-        Privilege writePrivilege("test", actions);
-        Privilege allDBsWritePrivilege("*", actions);
-        AuthzManagerExternalStateMock* managerExternalState = new AuthzManagerExternalStateMock();
-        AuthorizationManager authManager(managerExternalState);
-        AuthzSessionExternalStateMock* sessionExternalState = new AuthzSessionExternalStateMock(
-                &authManager);
-        AuthorizationSession authzSession(sessionExternalState);
-
-        ASSERT_FALSE(authzSession.checkAuthorization("test", ActionType::insert));
-        sessionExternalState->setReturnValueForShouldIgnoreAuthChecks(true);
-        ASSERT_TRUE(authzSession.checkAuthorization("test", ActionType::insert));
-        sessionExternalState->setReturnValueForShouldIgnoreAuthChecks(false);
-        ASSERT_FALSE(authzSession.checkAuthorization("test", ActionType::insert));
-
-        ASSERT_EQUALS(ErrorCodes::UserNotFound,
-                      authzSession.acquirePrivilege(writePrivilege, principal->getName()));
-        authzSession.addAuthorizedPrincipal(principal);
-        ASSERT_OK(authzSession.acquirePrivilege(writePrivilege, principal->getName()));
-        ASSERT_TRUE(authzSession.checkAuthorization("test", ActionType::insert));
-
-        ASSERT_FALSE(authzSession.checkAuthorization("otherDb", ActionType::insert));
-        ASSERT_OK(authzSession.acquirePrivilege(allDBsWritePrivilege, principal->getName()));
-        ASSERT_TRUE(authzSession.checkAuthorization("otherDb", ActionType::insert));
-        // Auth checks on a collection should be applied to the database name.
-        ASSERT_TRUE(authzSession.checkAuthorization("otherDb.collectionName", ActionType::insert));
-
-        authzSession.logoutDatabase("test");
-        ASSERT_FALSE(authzSession.checkAuthorization("test", ActionType::insert));
-    }
-
-    class AuthManagerExternalStateImplictPriv : public AuthzManagerExternalStateMock {
+    class FailureCapableAuthzManagerExternalStateMock :
+        public AuthzManagerExternalStateMock {
     public:
-        AuthManagerExternalStateImplictPriv() : AuthzManagerExternalStateMock() {}
+        FailureCapableAuthzManagerExternalStateMock() : _findsShouldFail(false) {}
+        virtual ~FailureCapableAuthzManagerExternalStateMock() {}
 
-        virtual bool _findUser(const string& usersNamespace,
+        void setFindsShouldFail(bool enable) { _findsShouldFail = enable; }
+
+        virtual Status findOne(const NamespaceString& collectionName,
                                const BSONObj& query,
-                               BSONObj* result) const {
+                               BSONObj* result) {
+            if (_findsShouldFail &&
+                collectionName == AuthorizationManager::usersCollectionNamespace) {
 
-        virtual Status _findUser(const std::string& usersNamespace,
-                                 const BSONObj& query,
-                                 BSONObj* result) {
-            if (_findsShouldFail) {
-                return Status(ErrorCodes::UnknownError, "_findUser set to fail in mock.");
+                return Status(ErrorCodes::UnknownError,
+                              "findOne on admin.system.users set to fail in mock.");
             }
-            else {
-                userSource = query[AuthorizationManager::USER_SOURCE_FIELD_NAME].String();
-            }
-            *result = mapFindWithDefault(_privilegeDocs,
-                                         std::make_pair(dbstr,
-                                                        UserName(user, userSource)),
-                                                        BSON("invalid" << 1));
-            return  !(*result)["invalid"].trueValue();
-        }
-
-        void addPrivilegeDocument(const string& dbname,
-                                  const UserName& user,
-                                  const BSONObj& doc) {
-
-            ASSERT(_privilegeDocs.insert(std::make_pair(std::make_pair(dbname, user),
-                                                        doc.getOwned())).second);
+            return AuthzManagerExternalStateMock::findOne(collectionName, query, result);
         }
 
     private:
-        std::map<std::pair<std::string, UserName>, BSONObj > _privilegeDocs;
+        bool _findsShouldFail;
     };
 
-    class AuthSessionExternalStateImplictPriv : public AuthzSessionExternalStateMock {
+    class AuthorizationSessionTest : public ::mongo::unittest::Test {
     public:
-        AuthSessionExternalStateImplictPriv(AuthorizationManager* authzManager,
-                                            AuthManagerExternalStateImplictPriv* managerExternal) :
-            AuthzSessionExternalStateMock(authzManager),
-            _authManagerExternalState(managerExternal) {}
-
-        void addPrivilegeDocument(const string& dbname,
-                                  const UserName& user,
-                                  const BSONObj& doc) {
-            _authManagerExternalState->addPrivilegeDocument(dbname, user, doc);
-        }
-
-    private:
-        AuthManagerExternalStateImplictPriv* _authManagerExternalState;
-    };
-
-    class ImplicitPriviligesTest : public ::mongo::unittest::Test {
-    public:
-        AuthManagerExternalStateImplictPriv* managerState;
-        AuthSessionExternalStateImplictPriv* sessionState;
-        scoped_ptr<AuthorizationSession> authzSession;
+        FailureCapableAuthzManagerExternalStateMock* managerState;
+        AuthzSessionExternalStateMock* sessionState;
         scoped_ptr<AuthorizationManager> authzManager;
+        scoped_ptr<AuthorizationSession> authzSession;
 
         void setUp() {
             managerState = new FailureCapableAuthzManagerExternalStateMock();
-            managerState->setAuthzVersion(2);
+            managerState->setAuthzVersion(AuthorizationManager::schemaVersion26Final);
             authzManager.reset(new AuthorizationManager(managerState));
-            sessionState = new AuthSessionExternalStateImplictPriv(authzManager.get(),
-                                                                   managerState);
+            sessionState = new AuthzSessionExternalStateMock(authzManager.get());
             authzSession.reset(new AuthorizationSession(sessionState));
+            authzManager->setAuthEnabled(true);
         }
     };
 
@@ -188,13 +125,9 @@ namespace {
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "readWrite" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false) <<
+                                                "db" << "test") <<
                                            BSON("role" << "dbAdmin" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "test"))),
                 BSONObj()));
         ASSERT_OK(authzSession->addAndAuthorizeUser(UserName("spencer", "test")));
 
@@ -211,9 +144,7 @@ namespace {
                      "db" << "admin" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "readWriteAnyDatabase" <<
-                                                "db" << "admin" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "admin"))),
                 BSONObj()));
         ASSERT_OK(authzSession->addAndAuthorizeUser(UserName("admin", "admin")));
 
@@ -247,50 +178,61 @@ namespace {
                              testFooCollResource, ActionType::collMod));
     }
 
+    TEST_F(AuthorizationSessionTest, DuplicateRolesOK) {
+        // Add a user with doubled-up readWrite and single dbAdmin on the test DB
+        ASSERT_OK(managerState->insertPrivilegeDocument("admin",
+                BSON("user" << "spencer" <<
+                     "db" << "test" <<
+                     "credentials" << BSON("MONGODB-CR" << "a") <<
+                     "roles" << BSON_ARRAY(BSON("role" << "readWrite" <<
+                                                "db" << "test") <<
+                                           BSON("role" << "dbAdmin" <<
+                                                "db" << "test") <<
+                                           BSON("role" << "readWrite" <<
+                                                "db" << "test"))),
+                BSONObj()));
+        ASSERT_OK(authzSession->addAndAuthorizeUser(UserName("spencer", "test")));
+
+        ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(
+                            testFooCollResource, ActionType::insert));
+        ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(
+                            testDBResource, ActionType::dbStats));
+        ASSERT_FALSE(authzSession->isAuthorizedForActionsOnResource(
+                             otherFooCollResource, ActionType::insert));
+    }
+
     TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
         ASSERT_OK(managerState->insertPrivilegeDocument("admin",
                 BSON("user" << "rw" <<
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "readWrite" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false) <<
+                                                "db" << "test") <<
                                            BSON("role" << "dbAdmin" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "test"))),
                 BSONObj()));
         ASSERT_OK(managerState->insertPrivilegeDocument("admin",
                 BSON("user" << "useradmin" <<
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "userAdmin" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "test"))),
                 BSONObj()));
         ASSERT_OK(managerState->insertPrivilegeDocument("admin",
                 BSON("user" << "rwany" <<
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "readWriteAnyDatabase" <<
-                                                "db" << "admin" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false) <<
+                                                "db" << "admin") <<
                                            BSON("role" << "dbAdminAnyDatabase" <<
-                                                "db" << "admin" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "admin"))),
                 BSONObj()));
         ASSERT_OK(managerState->insertPrivilegeDocument("admin",
                 BSON("user" << "useradminany" <<
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "userAdminAnyDatabase" <<
-                                                "db" << "admin" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "admin"))),
                 BSONObj()));
 
         ASSERT_OK(authzSession->addAndAuthorizeUser(UserName("rwany", "test")));
@@ -379,9 +321,7 @@ namespace {
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "readWrite" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "test"))),
                 BSONObj()));
         ASSERT_OK(authzSession->addAndAuthorizeUser(UserName("spencer", "test")));
 
@@ -394,15 +334,18 @@ namespace {
         ASSERT(user->isValid());
 
         // Change the user to be read-only
-        managerState->clearPrivilegeDocuments();
+        int ignored;
+        managerState->remove(
+                AuthorizationManager::usersCollectionNamespace,
+                BSONObj(),
+                BSONObj(),
+                &ignored);
         ASSERT_OK(managerState->insertPrivilegeDocument("admin",
                 BSON("user" << "spencer" <<
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "read" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "test"))),
                 BSONObj()));
 
         // Make sure that invalidating the user causes the session to reload its privileges.
@@ -417,7 +360,11 @@ namespace {
         ASSERT(user->isValid());
 
         // Delete the user.
-        managerState->clearPrivilegeDocuments();
+        managerState->remove(
+                AuthorizationManager::usersCollectionNamespace,
+                BSONObj(),
+                BSONObj(),
+                &ignored);
         // Make sure that invalidating the user causes the session to reload its privileges.
         authzManager->invalidateUserByName(user->getName());
         authzSession->startRequest(); // Refreshes cached data for invalid users
@@ -435,9 +382,7 @@ namespace {
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "readWrite" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "test"))),
                 BSONObj()));
         ASSERT_OK(authzSession->addAndAuthorizeUser(UserName("spencer", "test")));
 
@@ -450,16 +395,19 @@ namespace {
         ASSERT(user->isValid());
 
         // Change the user to be read-only
+        int ignored;
         managerState->setFindsShouldFail(true);
-        managerState->clearPrivilegeDocuments();
+        managerState->remove(
+                AuthorizationManager::usersCollectionNamespace,
+                BSONObj(),
+                BSONObj(),
+                &ignored);
         ASSERT_OK(managerState->insertPrivilegeDocument("admin",
                 BSON("user" << "spencer" <<
                      "db" << "test" <<
                      "credentials" << BSON("MONGODB-CR" << "a") <<
                      "roles" << BSON_ARRAY(BSON("role" << "read" <<
-                                                "db" << "test" <<
-                                                "hasRole" << true <<
-                                                "canDelegate" << false))),
+                                                "db" << "test"))),
                 BSONObj()));
 
         // Even though the user's privileges have been reduced, since we've configured user
@@ -484,18 +432,19 @@ namespace {
 
 
     TEST_F(AuthorizationSessionTest, ImplicitAcquireFromSomeDatabasesWithV1Users) {
-        return;
-        managerState->setAuthzVersion(1);
+        managerState->setAuthzVersion(AuthorizationManager::schemaVersion24);
 
         managerState->insert(NamespaceString("test.system.users"),
                                     BSON("user" << "andy" <<
                                          "pwd" << "a" <<
-                                         "roles" << BSON_ARRAY("readWrite")));
-        sessionState->addPrivilegeDocument("test2", UserName("andy", "test"),
+                                         "roles" << BSON_ARRAY("readWrite")),
+                                    BSONObj());
+        managerState->insert(NamespaceString("other.system.users"),
                                     BSON("user" << "andy" <<
                                          "userSource" << "test" <<
-                                         "roles" <<  BSON_ARRAY("read")));
-        sessionState->addPrivilegeDocument("admin", UserName("andy", "test"),
+                                         "roles" <<  BSON_ARRAY("read")),
+                                    BSONObj());
+        managerState->insert(NamespaceString("admin.system.users"),
                                     BSON("user" << "andy" <<
                                          "userSource" << "test" <<
                                          "roles" << BSON_ARRAY("clusterAdmin") <<

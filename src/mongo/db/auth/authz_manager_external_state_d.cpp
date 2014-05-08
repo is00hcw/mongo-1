@@ -12,14 +12,30 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/db/auth/authz_manager_external_state_d.h"
 
+#include <boost/thread/mutex.hpp>
+#include <boost/date_time/time_duration.hpp>
+#include <string>
+
 #include "mongo/base/status.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
-#include "mongo/db/d_concurrency.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/jsobj.h"
@@ -31,135 +47,57 @@ namespace mongo {
     AuthzManagerExternalStateMongod::AuthzManagerExternalStateMongod() {}
     AuthzManagerExternalStateMongod::~AuthzManagerExternalStateMongod() {}
 
-    Status AuthzManagerExternalStateMongod::insertPrivilegeDocument(const string& dbname,
-                                                                    const BSONObj& userObj) {
-        try {
-            string userNS = dbname + ".system.users";
-            DBDirectClient client;
-            {
-                Client::GodScope gs;
-                // TODO(spencer): Once we're no longer fully rebuilding the user cache on every
-                // change to user data we should remove the global lock and uncomment the
-                // WriteContext below
-                Lock::GlobalWrite w;
-                // Client::WriteContext ctx(userNS);
-                client.insert(userNS, userObj);
-            }
+    Status AuthzManagerExternalStateMongod::_getUserDocument(const UserName& userName,
+                                                             BSONObj* userDoc) {
 
-        // 30 second timeout for w:majority
-        BSONObj res = client.getLastErrorDetailed(false, false, -1, 30*1000);
-        string errstr = client.getLastErrorString(res);
-        if (errstr.empty()) {
-            return Status::OK();
+        Client::ReadContext ctx("admin");
+        int authzVersion;
+        Status status = getStoredAuthorizationVersion(&authzVersion);
+        if (!status.isOK())
+            return status;
+
+        switch (authzVersion) {
+        case AuthorizationManager::schemaVersion26Upgrade:
+        case AuthorizationManager::schemaVersion26Final:
+            break;
+        default:
+            return Status(ErrorCodes::AuthSchemaIncompatible, mongoutils::str::stream() <<
+                          "Unsupported schema version for getUserDescription(): " <<
+                          authzVersion);
         }
-        if (res.hasField("code") && res["code"].Int() == ASSERT_ID_DUPKEY) {
-            return Status(ErrorCodes::DuplicateKey,
-                          mongoutils::str::stream() << "User \"" << userObj["user"].String() <<
-                                 "\" already exists on database \"" << dbname << "\"");
+
+        status = findOne(
+                (authzVersion == AuthorizationManager::schemaVersion26Final ?
+                 AuthorizationManager::usersCollectionNamespace :
+                 AuthorizationManager::usersAltCollectionNamespace),
+                BSON(AuthorizationManager::USER_NAME_FIELD_NAME << userName.getUser() <<
+                     AuthorizationManager::USER_DB_FIELD_NAME << userName.getDB()),
+                userDoc);
+        if (status == ErrorCodes::NoMatchingDocument) {
+            status = Status(ErrorCodes::UserNotFound, mongoutils::str::stream() <<
+                            "Could not find user " << userName.getFullName());
         }
-        return Status(ErrorCodes::UserModificationFailed, errstr);
+        return status;
     }
 
-    Status AuthzManagerExternalStateMongod::updatePrivilegeDocument(
-            const UserName& user, const BSONObj& updateObj) {
+    Status AuthzManagerExternalStateMongod::query(
+            const NamespaceString& collectionName,
+            const BSONObj& query,
+            const BSONObj& projection,
+            const boost::function<void(const BSONObj&)>& resultProcessor) {
         try {
-            string userNS = mongoutils::str::stream() << user.getDB() << ".system.users";
             DBDirectClient client;
-            {
-                Client::GodScope gs;
-                // TODO(spencer): Once we're no longer fully rebuilding the user cache on every
-                // change to user data we should remove the global lock and uncomment the
-                // WriteContext below
-                Lock::GlobalWrite w;
-                // Client::WriteContext ctx(userNS);
-                client.update(userNS,
-                              QUERY("user" << user.getUser() << "userSource" << BSONNULL),
-                              updateObj);
-            }
-
-            // 30 second timeout for w:majority
-            BSONObj res = client.getLastErrorDetailed(false, false, -1, 30*1000);
-            string err = client.getLastErrorString(res);
-            if (!err.empty()) {
-                return Status(ErrorCodes::UserModificationFailed, err);
-            }
-
-            int numUpdated = res["n"].numberInt();
-            dassert(numUpdated <= 1 && numUpdated >= 0);
-            if (numUpdated == 0) {
-                return Status(ErrorCodes::UserNotFound,
-                              mongoutils::str::stream() << "User " << user.getFullName() <<
-                                      " not found");
-            }
-
-            return Status::OK();
-        } catch (const DBException& e) {
-            return e.toStatus();
-        }
-
-    Status AuthzManagerExternalStateMongod::removePrivilegeDocuments(const string& dbname,
-                                                                     const BSONObj& query) {
-        try {
-            string userNS = dbname + ".system.users";
-            DBDirectClient client;
-            {
-                Client::GodScope gs;
-                // TODO(spencer): Once we're no longer fully rebuilding the user cache on every
-                // change to user data we should remove the global lock and uncomment the
-                // WriteContext below
-                Lock::GlobalWrite w;
-                // Client::WriteContext ctx(userNS);
-                client.remove(userNS, query);
-            }
-
-            // 30 second timeout for w:majority
-            BSONObj res = client.getLastErrorDetailed(false, false, -1, 30*1000);
-            string errstr = client.getLastErrorString(res);
-            if (!errstr.empty()) {
-                return Status(ErrorCodes::UserModificationFailed, errstr);
-            }
-
-            int numUpdated = res["n"].numberInt();
-            if (numUpdated == 0) {
-                return Status(ErrorCodes::UserNotFound,
-                              mongoutils::str::stream() << "No users found on database \"" << dbname
-                                      << "\" matching query: " << query.toString());
-            }
+            client.query(resultProcessor, collectionName.ns(), query, &projection);
             return Status::OK();
         } catch (const DBException& e) {
             return e.toStatus();
         }
     }
-
-    Status AuthzManagerExternalStateMongod::_findUser(const string& usersNamespace,
-                                                      const BSONObj& query,
-                                                      BSONObj* result) {
-        Client::GodScope gs;
-        Client::ReadContext ctx(usersNamespace);
-
-        int numUpdated = res["n"].numberInt();
-        dassert(numUpdated <= 1 && numUpdated >= 0);
-        if (numUpdated == 0) {
-            return Status(ErrorCodes::UserNotFound,
-                          mongoutils::str::stream() << "User " << user.getFullName() <<
-                                  " not found");
-        }
 
     Status AuthzManagerExternalStateMongod::getAllDatabaseNames(
             std::vector<std::string>* dbnames) {
-        Lock::GlobalWrite lk;
+        Lock::GlobalRead lk;
         getDatabaseNames(*dbnames);
-        return Status::OK();
-    }
-
-    Status AuthzManagerExternalStateMongod::getAllV1PrivilegeDocsForDB(
-            const std::string& dbname, std::vector<BSONObj>* privDocs) {
-        std::string usersNamespace = dbname + ".system.users";
-
-        Client::GodScope gs;
-        Client::ReadContext ctx(usersNamespace);
-
-        *privDocs = Helpers::findAll(usersNamespace, BSONObj());
         return Status::OK();
     }
 
@@ -167,59 +105,159 @@ namespace mongo {
             const NamespaceString& collectionName,
             const BSONObj& query,
             BSONObj* result) {
-        fassertFailed(17091);
+
+        Client::ReadContext ctx(collectionName.ns());
+        BSONObj found;
+        if (Helpers::findOne(collectionName.ns(),
+                             query,
+                             found)) {
+            *result = found.getOwned();
+            return Status::OK();
+        }
+        return Status(ErrorCodes::NoMatchingDocument, mongoutils::str::stream() <<
+                      "No document in " << collectionName.ns() << " matches " << query);
     }
 
     Status AuthzManagerExternalStateMongod::insert(
             const NamespaceString& collectionName,
-            const BSONObj& document) {
-        fassertFailed(17092);
+            const BSONObj& document,
+            const BSONObj& writeConcern) {
+        try {
+            DBDirectClient client;
+            client.insert(collectionName, document);
+
+            // Handle write concern
+            BSONObjBuilder gleBuilder;
+            gleBuilder.append("getLastError", 1);
+            gleBuilder.appendElements(writeConcern);
+            BSONObj res;
+            client.runCommand("admin", gleBuilder.done(), res);
+            string errstr = client.getLastErrorString(res);
+            if (errstr.empty()) {
+                return Status::OK();
+            }
+            if (res.hasField("code") && res["code"].Int() == ASSERT_ID_DUPKEY) {
+                return Status(ErrorCodes::DuplicateKey, errstr);
+            }
+            return Status(ErrorCodes::UnknownError, errstr);
+        } catch (const DBException& e) {
+            return e.toStatus();
+        }
     }
 
-    Status AuthzManagerExternalStateMongod::updateOne(
-            const NamespaceString& collectionName,
-            const BSONObj& query,
-            const BSONObj& updatePattern,
-            bool upsert) {
-        fassertFailed(17093);
+    Status AuthzManagerExternalStateMongod::update(const NamespaceString& collectionName,
+                                                   const BSONObj& query,
+                                                   const BSONObj& updatePattern,
+                                                   bool upsert,
+                                                   bool multi,
+                                                   const BSONObj& writeConcern,
+                                                   int* nMatched) {
+        try {
+            DBDirectClient client;
+            client.update(collectionName, query, updatePattern, upsert, multi);
+
+            // Handle write concern
+            BSONObjBuilder gleBuilder;
+            gleBuilder.append("getLastError", 1);
+            gleBuilder.appendElements(writeConcern);
+            BSONObj res;
+            client.runCommand("admin", gleBuilder.done(), res);
+            string err = client.getLastErrorString(res);
+            if (!err.empty()) {
+                return Status(ErrorCodes::UnknownError, err);
+            }
+
+            *nMatched = res["n"].numberInt();
+            return Status::OK();
+        } catch (const DBException& e) {
+            return e.toStatus();
+        }
     }
 
     Status AuthzManagerExternalStateMongod::remove(
             const NamespaceString& collectionName,
-            const BSONObj& query) {
-        fassertFailed(17094);
+            const BSONObj& query,
+            const BSONObj& writeConcern,
+            int* numRemoved) {
+        try {
+            DBDirectClient client;
+            client.remove(collectionName, query);
+
+            // Handle write concern
+            BSONObjBuilder gleBuilder;
+            gleBuilder.append("getLastError", 1);
+            gleBuilder.appendElements(writeConcern);
+            BSONObj res;
+            client.runCommand("admin", gleBuilder.done(), res);
+            string errstr = client.getLastErrorString(res);
+            if (!errstr.empty()) {
+                return Status(ErrorCodes::UnknownError, errstr);
+            }
+
+            *numRemoved = res["n"].numberInt();
+            return Status::OK();
+        } catch (const DBException& e) {
+            return e.toStatus();
+        }
     }
 
     Status AuthzManagerExternalStateMongod::createIndex(
             const NamespaceString& collectionName,
             const BSONObj& pattern,
-            bool unique) {
-        fassertFailed(17095);
+            bool unique,
+            const BSONObj& writeConcern) {
+        DBDirectClient client;
+        try {
+            if (client.ensureIndex(collectionName.ns(),
+                                   pattern,
+                                   unique)) {
+                BSONObjBuilder gleBuilder;
+                gleBuilder.append("getLastError", 1);
+                gleBuilder.appendElements(writeConcern);
+                BSONObj res;
+                client.runCommand("admin", gleBuilder.done(), res);
+                string errstr = client.getLastErrorString(res);
+                if (!errstr.empty()) {
+                    return Status(ErrorCodes::UnknownError, errstr);
+                }
+            }
+            return Status::OK();
+        }
+        catch (const DBException& ex) {
+            return ex.toStatus();
+        }
     }
 
-    Status AuthzManagerExternalStateMongod::dropCollection(
-            const NamespaceString& collectionName) {
-        fassertFailed(17096);
+    Status AuthzManagerExternalStateMongod::dropIndexes(
+            const NamespaceString& collectionName,
+            const BSONObj& writeConcern) {
+        DBDirectClient client;
+        try {
+            client.dropIndexes(collectionName.ns());
+            BSONObjBuilder gleBuilder;
+            gleBuilder.append("getLastError", 1);
+            gleBuilder.appendElements(writeConcern);
+            BSONObj res;
+            client.runCommand("admin", gleBuilder.done(), res);
+            string errstr = client.getLastErrorString(res);
+            if (!errstr.empty()) {
+                return Status(ErrorCodes::UnknownError, errstr);
+            }
+            return Status::OK();
+        }
+        catch (const DBException& ex) {
+            return ex.toStatus();
+        }
     }
 
-    Status AuthzManagerExternalStateMongod::renameCollection(
-            const NamespaceString& oldName,
-            const NamespaceString& newName) {
-        fassertFailed(17097);
+    bool AuthzManagerExternalStateMongod::tryAcquireAuthzUpdateLock(const StringData& why) {
+        LOG(2) << "Attempting to lock user data for: " << why << endl;
+        return _authzDataUpdateLock.timed_lock(
+                boost::posix_time::milliseconds(_authzUpdateLockAcquisitionTimeoutMillis));
     }
 
-    Status AuthzManagerExternalStateMongod::copyCollection(
-            const NamespaceString& fromName,
-            const NamespaceString& toName) {
-        fassertFailed(17098);
-    }
-
-    bool AuthzManagerExternalStateMongod::tryLockUpgradeProcess() {
-        fassertFailed(17099);
-    }
-
-    void AuthzManagerExternalStateMongod::unlockUpgradeProcess() {
-        fassertFailed(17100);
+    void AuthzManagerExternalStateMongod::releaseAuthzUpdateLock() {
+        return _authzDataUpdateLock.unlock();
     }
 
 } // namespace mongo

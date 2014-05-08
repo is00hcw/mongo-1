@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #include "mongo/db/auth/authz_manager_external_state_mock.h"
@@ -22,33 +34,98 @@
 #include "mongo/bson/mutable/algorithm.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/element.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/update_driver.h"
 #include "mongo/platform/unordered_set.h"
 #include "mongo/util/map_util.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-
-    Status AuthzManagerExternalStateMock::updatePrivilegeDocument(const UserName& user,
-                                                                  const BSONObj& updateObj) {
-        return Status(ErrorCodes::InternalError, "Not implemented in mock.");
+namespace {
+    void addRoleNameToObjectElement(mutablebson::Element object, const RoleName& role) {
+        fassert(17175, object.appendString(AuthorizationManager::ROLE_NAME_FIELD_NAME, role.getRole()));
+        fassert(17176, object.appendString(AuthorizationManager::ROLE_SOURCE_FIELD_NAME, role.getDB()));
     }
 
-    Status AuthzManagerExternalStateMock::removePrivilegeDocuments(const std::string& dbname,
-                                                                   const BSONObj& query) {
-        return Status(ErrorCodes::InternalError, "Not implemented in mock.");
+    void addRoleNameObjectsToArrayElement(mutablebson::Element array, RoleNameIterator roles) {
+        for (; roles.more(); roles.next()) {
+            mutablebson::Element roleElement = array.getDocument().makeElementObject("");
+            addRoleNameToObjectElement(roleElement, roles.get());
+            fassert(17177, array.pushBack(roleElement));
+        }
     }
 
-    Status AuthzManagerExternalStateMock::insertPrivilegeDocument(const std::string& dbname,
-                                                                  const BSONObj& userObj) {
-        NamespaceString usersCollection(dbname + ".system.users");
-        return insert(usersCollection, userObj);
+    void addPrivilegeObjectsOrWarningsToArrayElement(mutablebson::Element privilegesElement,
+                                                     mutablebson::Element warningsElement,
+                                                     const PrivilegeVector& privileges) {
+        std::string errmsg;
+        for (size_t i = 0; i < privileges.size(); ++i) {
+            ParsedPrivilege pp;
+            if (ParsedPrivilege::privilegeToParsedPrivilege(privileges[i], &pp, &errmsg)) {
+                fassert(17178, privilegesElement.appendObject("", pp.toBSON()));
+            } else {
+                fassert(17179,
+                        warningsElement.appendString(
+                        "",
+                        std::string(mongoutils::str::stream() <<
+                                    "Skipped privileges on resource " <<
+                                    privileges[i].getResourcePattern().toString() <<
+                                    ". Reason: " << errmsg)));
+            }
+        }
+    }
+}  // namespace
+
+    AuthzManagerExternalStateMock::AuthzManagerExternalStateMock() : _authzManager(NULL) {}
+    AuthzManagerExternalStateMock::~AuthzManagerExternalStateMock() {}
+
+    void AuthzManagerExternalStateMock::setAuthorizationManager(
+            AuthorizationManager* authzManager) {
+        _authzManager = authzManager;
     }
 
-    void AuthzManagerExternalStateMock::clearPrivilegeDocuments() {
-        _documents.clear();
+    void AuthzManagerExternalStateMock::setAuthzVersion(int version) {
+        uassertStatusOK(
+                updateOne(AuthorizationManager::versionCollectionNamespace,
+                          AuthorizationManager::versionDocumentQuery,
+                          BSON("$set" << BSON(AuthorizationManager::schemaVersionFieldName <<
+                                              version)),
+                          true,
+                          BSONObj()));
+    }
+
+    Status AuthzManagerExternalStateMock::_getUserDocument(const UserName& userName,
+                                                           BSONObj* userDoc) {
+        int authzVersion;
+        Status status = getStoredAuthorizationVersion(&authzVersion);
+        if (!status.isOK())
+            return status;
+
+        switch (authzVersion) {
+        case AuthorizationManager::schemaVersion26Upgrade:
+        case AuthorizationManager::schemaVersion26Final:
+            break;
+        default:
+            return Status(ErrorCodes::AuthSchemaIncompatible, mongoutils::str::stream() <<
+                          "Unsupported schema version for getUserDescription(): " <<
+                          authzVersion);
+        }
+
+        status = findOne(
+                (authzVersion == AuthorizationManager::schemaVersion26Final ?
+                 AuthorizationManager::usersCollectionNamespace :
+                 AuthorizationManager::usersAltCollectionNamespace),
+                BSON(AuthorizationManager::USER_NAME_FIELD_NAME << userName.getUser() <<
+                     AuthorizationManager::USER_DB_FIELD_NAME << userName.getDB()),
+                userDoc);
+        if (status == ErrorCodes::NoMatchingDocument) {
+            status = Status(ErrorCodes::UserNotFound, mongoutils::str::stream() <<
+                            "Could not find user " << userName.getFullName());
+        }
+        return status;
     }
 
     Status AuthzManagerExternalStateMock::getAllDatabaseNames(
@@ -59,19 +136,6 @@ namespace mongo {
             dbnameSet.insert(it->first.db().toString());
         }
         *dbnames = std::vector<std::string>(dbnameSet.begin(), dbnameSet.end());
-        return Status::OK();
-    }
-
-    Status AuthzManagerExternalStateMock::getAllV1PrivilegeDocsForDB(
-            const std::string& dbname, BSONObjCollection* privDocs) {
-        NamespaceDocumentMap::const_iterator iter =
-            _documents.find(NamespaceString(dbname + ".system.users"));
-        if (iter == _documents.end())
-            return Status::OK();  // No system.users collection in DB "dbname".
-        const BSONObjCollection& dbDocs = iter->second;
-        for (BSONObjCollection::const_iterator it = dbDocs.begin(); it != dbDocs.end(); ++it) {
-            privDocs->push_back(*it);
-        }
         return Status::OK();
     }
 
@@ -98,10 +162,51 @@ namespace mongo {
         return Status::OK();
     }
 
+    Status AuthzManagerExternalStateMock::query(
+            const NamespaceString& collectionName,
+            const BSONObj& query,
+            const BSONObj&,
+            const boost::function<void(const BSONObj&)>& resultProcessor) {
+        std::vector<BSONObjCollection::iterator> iterVector;
+        Status status = _queryVector(collectionName, query, &iterVector);
+        if (!status.isOK()) {
+            return status;
+        }
+        try {
+            for (std::vector<BSONObjCollection::iterator>::iterator it = iterVector.begin();
+                 it != iterVector.end(); ++it) {
+                resultProcessor(**it);
+            }
+        }
+        catch (const DBException& ex) {
+            status = ex.toStatus();
+        }
+        return status;
+    }
+
     Status AuthzManagerExternalStateMock::insert(
             const NamespaceString& collectionName,
-            const BSONObj& document) {
-        _documents[collectionName].push_back(document.copy());
+            const BSONObj& document,
+            const BSONObj&) {
+        BSONObj toInsert;
+        if (document["_id"].eoo()) {
+            BSONObjBuilder docWithIdBuilder;
+            docWithIdBuilder.append("_id", OID::gen());
+            docWithIdBuilder.appendElements(document);
+            toInsert = docWithIdBuilder.obj();
+        }
+        else {
+            toInsert = document.copy();
+        }
+        _documents[collectionName].push_back(toInsert);
+        if (_authzManager) {
+            _authzManager->logOp(
+                    "i",
+                    collectionName.ns().c_str(),
+                    toInsert,
+                    NULL,
+                    NULL);
+        }
         return Status::OK();
     }
 
@@ -109,11 +214,11 @@ namespace mongo {
             const NamespaceString& collectionName,
             const BSONObj& query,
             const BSONObj& updatePattern,
-            bool upsert) {
+            bool upsert,
+            const BSONObj& writeConcern) {
 
         namespace mmb = mutablebson;
         UpdateDriver::Options updateOptions;
-        updateOptions.upsert = upsert;
         UpdateDriver driver(updateOptions);
         Status status = driver.parse(updatePattern);
         if (!status.isOK())
@@ -124,83 +229,96 @@ namespace mongo {
         mmb::Document document;
         if (status.isOK()) {
             document.reset(*iter, mmb::Document::kInPlaceDisabled);
-            status = driver.update(StringData(), &document, NULL);
+            BSONObj logObj;
+            status = driver.update(StringData(), &document, &logObj);
             if (!status.isOK())
                 return status;
-            *iter = document.getObject().copy();
+            BSONObj newObj = document.getObject().copy();
+            *iter = newObj;
+            BSONObj idQuery = driver.makeOplogEntryQuery(newObj, false);
+            if (_authzManager) {
+                _authzManager->logOp(
+                        "u",
+                        collectionName.ns().c_str(),
+                        logObj,
+                        &idQuery,
+                        NULL);
+            }
             return Status::OK();
         }
         else if (status == ErrorCodes::NoMatchingDocument && upsert) {
             if (query.hasField("_id")) {
                 document.root().appendElement(query["_id"]);
             }
-            status = driver.createFromQuery(query, document);
+            status = driver.populateDocumentWithQueryFields(query, document);
             if (!status.isOK()) {
                 return status;
             }
-            status = driver.update(StringData(), &document, NULL);
+            status = driver.update(StringData(), &document);
             if (!status.isOK()) {
                 return status;
             }
-            return insert(collectionName, document.getObject());
+            return insert(collectionName, document.getObject(), writeConcern);
         }
         else {
             return status;
         }
     }
 
+    Status AuthzManagerExternalStateMock::update(const NamespaceString& collectionName,
+                                                 const BSONObj& query,
+                                                 const BSONObj& updatePattern,
+                                                 bool upsert,
+                                                 bool multi,
+                                                 const BSONObj& writeConcern,
+                                                 int* nMatched) {
+        return Status(ErrorCodes::InternalError,
+                      "AuthzManagerExternalStateMock::update not implemented in mock.");
+    }
+
     Status AuthzManagerExternalStateMock::remove(
             const NamespaceString& collectionName,
-            const BSONObj& query) {
+            const BSONObj& query,
+            const BSONObj&,
+            int* numRemoved) {
+        int n = 0;
         BSONObjCollection::iterator iter;
         while (_findOneIter(collectionName, query, &iter).isOK()) {
+            BSONObj idQuery = (*iter)["_id"].wrap();
             _documents[collectionName].erase(iter);
+            ++n;
+            if (_authzManager) {
+                _authzManager->logOp(
+                        "d",
+                        collectionName.ns().c_str(),
+                        idQuery,
+                        NULL,
+                        NULL);
+            }
         }
+        *numRemoved = n;
         return Status::OK();
     }
 
     Status AuthzManagerExternalStateMock::createIndex(
             const NamespaceString& collectionName,
             const BSONObj& pattern,
-            bool unique) {
+            bool unique,
+            const BSONObj&) {
         return Status::OK();
     }
 
-    Status AuthzManagerExternalStateMock::dropCollection(const NamespaceString& collectionName) {
-        _documents.erase(collectionName);
+    Status AuthzManagerExternalStateMock::dropIndexes(
+            const NamespaceString& collectionName,
+            const BSONObj& writeConcern) {
         return Status::OK();
     }
 
-    Status AuthzManagerExternalStateMock::renameCollection(const NamespaceString& oldName,
-                                                           const NamespaceString& newName) {
-        if (_documents.count(oldName) == 0) {
-            return Status(ErrorCodes::NamespaceNotFound,
-                          "No collection to rename named " + oldName.ns());
-        }
-        std::swap(_documents[newName], _documents[oldName]);
-        return dropCollection(oldName);
-    }
-
-    Status AuthzManagerExternalStateMock::copyCollection(const NamespaceString& fromName,
-                                                         const NamespaceString& toName) {
-        if (_documents.count(fromName) == 0) {
-            return Status(ErrorCodes::NamespaceNotFound,
-                          "No collection to copy named " + fromName.ns());
-        }
-        if (_documents.count(toName) > 0) {
-            return Status(ErrorCodes::NamespaceExists,
-                          "Cannot copy into existing namespace " + fromName.ns());
-        }
-
-        _documents[toName] = _documents[fromName];
-        return Status::OK();
-    }
-
-    bool AuthzManagerExternalStateMock::tryLockUpgradeProcess() {
+    bool AuthzManagerExternalStateMock::tryAcquireAuthzUpdateLock(const StringData&) {
         return true;
     }
 
-    void AuthzManagerExternalStateMock::unlockUpgradeProcess() {}
+    void AuthzManagerExternalStateMock::releaseAuthzUpdateLock() {}
 
     std::vector<BSONObj> AuthzManagerExternalStateMock::getCollectionContents(
             const NamespaceString& collectionName) {
@@ -211,28 +329,42 @@ namespace mongo {
             const NamespaceString& collectionName,
             const BSONObj& query,
             BSONObjCollection::iterator* result) {
+        std::vector<BSONObjCollection::iterator> iterVector;
+        Status status = _queryVector(collectionName, query, &iterVector);
+        if (!status.isOK()) {
+            return status;
+        }
+        if (!iterVector.size()) {
+            return Status(ErrorCodes::NoMatchingDocument, "No matching document");
+        }
+        *result = iterVector.front();
+        return Status::OK();
+    }
+
+    Status AuthzManagerExternalStateMock::_queryVector(
+            const NamespaceString& collectionName,
+            const BSONObj& query,
+            std::vector<BSONObjCollection::iterator>* result) {
 
         StatusWithMatchExpression parseResult = MatchExpressionParser::parse(query);
         if (!parseResult.isOK()) {
-            return false;
+            return parseResult.getStatus();
         }
         MatchExpression* matcher = parseResult.getValue();
 
         NamespaceDocumentMap::iterator mapIt = _documents.find(collectionName);
         if (mapIt == _documents.end())
-            return Status(ErrorCodes::NoMatchingDocument,
-                          "No collection named " + collectionName.ns());
+            return Status::OK();
 
         for (BSONObjCollection::iterator vecIt = mapIt->second.begin();
              vecIt != mapIt->second.end();
              ++vecIt) {
 
             if (matcher->matchesBSON(*vecIt)) {
-                *result = vecIt;
-                return Status::OK();
+                result->push_back(vecIt);
             }
         }
-        return Status(ErrorCodes::NoMatchingDocument, "No matching document");
+        return Status::OK();
     }
 
 } // namespace mongo

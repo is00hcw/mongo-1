@@ -231,20 +231,29 @@ namespace {
         mutablebson::Element inheritedRolesElement = resultDoc.makeElementArray("inheritedRoles");
         fassert(17165, resultDoc.root().pushBack(inheritedRolesElement));
         mutablebson::Element privilegesElement = resultDoc.makeElementArray("privileges");
+        mutablebson::Element inheritedPrivilegesElement =
+                resultDoc.makeElementArray("inheritedPrivileges");
         if (showPrivileges) {
             fassert(17166, resultDoc.root().pushBack(privilegesElement));
         }
-        fassert(17267,
-                resultDoc.root().appendBool("isBuiltin", _roleGraph.isBuiltinRole(roleName)));
         mutablebson::Element warningsElement = resultDoc.makeElementArray("warnings");
 
         addRoleNameObjectsToArrayElement(rolesElement, _roleGraph.getDirectSubordinates(roleName));
         if (_roleGraphState == roleGraphStateConsistent) {
             addRoleNameObjectsToArrayElement(
-                    indirectRolesElement, _roleGraph.getIndirectSubordinates(roleName));
+                    inheritedRolesElement, _roleGraph.getIndirectSubordinates(roleName));
             if (showPrivileges) {
                 addPrivilegeObjectsOrWarningsToArrayElement(
-                        privilegesElement, warningsElement, _roleGraph.getAllPrivileges(roleName));
+                        privilegesElement,
+                        warningsElement,
+                        _roleGraph.getDirectPrivileges(roleName));
+
+                addPrivilegeObjectsOrWarningsToArrayElement(
+                        inheritedPrivilegesElement,
+                        warningsElement,
+                        _roleGraph.getAllPrivileges(roleName));
+
+                fassert(17323, resultDoc.root().pushBack(inheritedPrivilegesElement));
             }
         }
         else if (showPrivileges) {

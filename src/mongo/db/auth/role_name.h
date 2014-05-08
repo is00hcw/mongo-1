@@ -12,18 +12,31 @@
  *
  *    You should have received a copy of the GNU Affero General Public License
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the GNU Affero General Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
+#include <iosfwd>
 #include <string>
+#include <vector>
 
 #include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
 #include "mongo/platform/hash_namespace.h"
-#include "mongo/platform/unordered_set.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -47,6 +60,8 @@ namespace mongo {
          * Gets the database name part of a role name.
          */
         StringData getDB() const { return StringData(_fullName).substr(_splitPoint + 1); }
+
+        bool empty() const { return _fullName.empty(); }
 
         /**
          * Gets the full name of a role as a string, formatted as "role@db".
@@ -79,6 +94,8 @@ namespace mongo {
         }
         return lhs.getDB() < rhs.getDB();
     }
+
+    std::ostream& operator<<(std::ostream& os, const RoleName& name);
 
 
     /**
@@ -135,27 +152,35 @@ MONGO_HASH_NAMESPACE_END
 
 namespace mongo {
 
-    // RoleNameIterator for iterating over an unordered_set of RoleNames.
-    class RoleNameSetIterator : public RoleNameIterator::Impl {
-        MONGO_DISALLOW_COPYING(RoleNameSetIterator);
-
+    template <typename ContainerIterator>
+    class RoleNameContainerIteratorImpl : public RoleNameIterator::Impl {
+        MONGO_DISALLOW_COPYING(RoleNameContainerIteratorImpl);
     public:
-        RoleNameSetIterator(const unordered_set<RoleName>::const_iterator& begin,
-                            const unordered_set<RoleName>::const_iterator& end);
-
-        virtual ~RoleNameSetIterator();
-
-        virtual bool more() const;
-
-        virtual const RoleName& next();
-
-        virtual const RoleName& get() const;
+        RoleNameContainerIteratorImpl(const ContainerIterator& begin,
+                                      const ContainerIterator& end) :
+            _curr(begin), _end(end) {}
+        virtual ~RoleNameContainerIteratorImpl() {}
+        virtual bool more() const { return _curr != _end; }
+        virtual const RoleName& next() { return *(_curr++); }
+        virtual const RoleName& get() const { return *_curr; }
+        virtual RoleNameIterator::Impl* doClone() const {
+            return new RoleNameContainerIteratorImpl(_curr, _end);
+        }
 
     private:
-        virtual Impl* doClone() const;
-
-        unordered_set<RoleName>::const_iterator _begin;
-        unordered_set<RoleName>::const_iterator _end;
+        ContainerIterator _curr;
+        ContainerIterator _end;
     };
+
+    template <typename ContainerIterator>
+    RoleNameIterator makeRoleNameIterator(const ContainerIterator& begin,
+                                          const ContainerIterator& end) {
+        return RoleNameIterator( new RoleNameContainerIteratorImpl<ContainerIterator>(begin, end));
+    }
+
+    template <typename Container>
+    RoleNameIterator makeRoleNameIteratorForContainer(const Container& container) {
+        return makeRoleNameIterator(container.begin(), container.end());
+    }
 
 }  // namespace mongo

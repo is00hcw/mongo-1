@@ -15,10 +15,12 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/role_name.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/platform/atomic_word.h"
@@ -49,6 +51,8 @@ namespace mongo {
             bool isExternal;
         };
 
+        typedef unordered_map<ResourcePattern, Privilege> ResourcePrivilegeMap;
+
         explicit User(const UserName& name);
         ~User();
 
@@ -58,14 +62,29 @@ namespace mongo {
         const UserName& getName() const;
 
         /**
-         * Returns an iterator that can be used to get the list of roles this user belongs to.
+         * Returns an iterator over the names of the user's direct roles
          */
-        const RoleNameIterator getRoles() const;
+        RoleNameIterator getRoles() const;
+
+        /**
+         * Returns true if this user is a member of the given role.
+         */
+        bool hasRole(const RoleName& roleName) const;
+
+        /**
+         * Returns a reference to the information about the user's privileges.
+         */
+        const ResourcePrivilegeMap& getPrivileges() const { return _privileges; }
+
+        /**
+         * Returns the CredentialData for this user.
+         */
+        const CredentialData& getCredentials() const;
 
         /**
          * Gets the set of actions this user is allowed to perform on the given resource.
          */
-        const ActionSet getActionsForResource(const std::string& resource) const;
+        const ActionSet getActionsForResource(const ResourcePattern& resource) const;
 
         /**
          * Gets the schema version of user documents used to build this user.  See comment on
@@ -93,18 +112,27 @@ namespace mongo {
          */
         uint32_t getRefCount() const;
 
+        /**
+         * Clones this user into a new, valid User object with refcount of 0.
+         */
+        User* clone() const;
 
         // Mutators below.  Mutation functions should *only* be called by the AuthorizationManager
-
-        /**
-         * Copies the contents of other into this User.
-         */
-        void copyFrom(const User& other);
 
         /**
          * Sets this user's authentication credentials.
          */
         void setCredentials(const CredentialData& credentials);
+
+        /**
+         * Replaces any existing user role membership information with the roles from "roles".
+         */
+        void setRoles(RoleNameIterator roles);
+
+        /**
+         * Replaces any existing user privilege information with "privileges".
+         */
+        void setPrivileges(const PrivilegeVector& privileges);
 
         /**
          * Adds the given role name to the list of roles of which this user is a member.
@@ -168,24 +196,21 @@ namespace mongo {
 
         UserName _name;
 
-        typedef unordered_map<std::string, Privilege> ResourcePrivilegeMap;
-
         // Maps resource name to privilege on that resource
         ResourcePrivilegeMap _privileges;
 
+        // Roles the user has privileges from
         unordered_set<RoleName> _roles;
 
         // List of databases already probed for privilege information for this user.  Only
-        // meaningful for V1-schema users.
+        // meaningful for V2.4-schema users.
         std::vector<std::string> _probedDatabases;
 
         // Credential information.
         CredentialData _credentials;
 
-        // Schema version of user documents used to build this user.  Valid values are 1 (for V1 and
-        // V0 documents) and 2 (for V2 documents).  We need this information because the V1 and V0
-        // users need to do extra probing when checking for privileges.  See
-        // AuthorizationManager::updateV1UserForResource().  Defaults to 2.
+        // Schema version of user documents used to build this user.  Valid values are
+        // AuthorizationManager::schemaVersion24 and schemaVersion26Final.
         int _schemaVersion;
 
         // _refCount and _isInvalidated are modified exclusively by the AuthorizationManager

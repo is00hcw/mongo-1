@@ -12,6 +12,18 @@
 *
 *    You should have received a copy of the GNU Affero General Public License
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*
+*    As a special exception, the copyright holders give permission to link the
+*    code of portions of this program with the OpenSSL library under certain
+*    conditions as described in each individual source file and distribute
+*    linked combinations including the program with the OpenSSL library. You
+*    must comply with the GNU Affero General Public License in all respects for
+*    all of the code used other than as permitted herein. If you modify file(s)
+*    with this exception, you may extend this exception to your version of the
+*    file(s), but you are not obligated to do so. If you do not wish to do so,
+*    delete this exception statement from your version. If you delete this
+*    exception statement from all source files in the program, then also delete
+*    it in the license file.
 */
 
 #pragma once
@@ -26,6 +38,8 @@
 
 namespace mongo {
 
+    class Principal;
+
     /**
      * Public interface for a class that encapsulates all the session information related to system
      * state not stored in AuthorizationSession.  This is primarily to make AuthorizationSession
@@ -38,7 +52,7 @@ namespace mongo {
 
         virtual ~AuthzSessionExternalState();
 
-        const AuthorizationManager& getAuthorizationManager() const;
+        AuthorizationManager& getAuthorizationManager();
 
         // Returns true if this connection should be treated as if it has full access to do
         // anything, regardless of the current auth state.  Currently the reasons why this could be
@@ -51,14 +65,6 @@ namespace mongo {
         // Should be called at the beginning of every new request.  This performs the checks
         // necessary to determine if localhost connections should be given full access.
         virtual void startRequest() = 0;
-
-        // Authorization event hooks
-
-        // Handle any global state which needs to be updated when a new user has been authorized
-        virtual void onAddAuthorizedPrincipal(Principal*) = 0;
-
-        // Handle any global state which needs to be updated when a user logs out
-        virtual void onLogoutDatabase(const std::string& dbname) = 0;
 
     protected:
         // This class should never be instantiated directly.
