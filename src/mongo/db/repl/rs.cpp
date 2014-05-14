@@ -604,7 +604,7 @@ namespace mongo {
             // from RS_RECOVERING.
             changeState(MemberState::RS_RECOVERING);
             if (replSettings.startInRecovery) {
-                
+                _maintenanceMode++;
             }
             else {
                 tryToGoLiveAsASecondary();
